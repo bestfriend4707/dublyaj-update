@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
