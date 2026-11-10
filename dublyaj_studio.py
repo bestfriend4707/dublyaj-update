@@ -35,8 +35,388 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.6"
+APP_VERSION = "1.7"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
+
+# ----------------------------------------------------------------------------------------
+#  LITSENZIYA (aktivatsiya kaliti) va imzolangan yangilanishlar
+#  * Kalit — dasturchining maxfiy kaliti bilan imzolangan (Ed25519). Soxta kalit yasab bo'lmaydi.
+#  * Kalit shu kompyuterga bog'lanadi (Mashina ID) va aktivlashtirilgan kundan boshlab 1 yil ishlaydi.
+#  * Yangilanish kodi ham imzolanadi: imzosiz/begona kod ishga tushmaydi.
+# ----------------------------------------------------------------------------------------
+LIC_PUB = bytes.fromhex("c3d89f33e26ebd92198bcdb2e18306d7feabb26b54340608b533a533386680a3")
+import hashlib as _hl
+
+_P = 2 ** 255 - 19
+_Q = 2 ** 252 + 27742317777372353535851937790883648493
+
+
+def _inv(x):
+    return pow(x, _P - 2, _P)
+
+
+_D = -121665 * _inv(121666) % _P
+_I = pow(2, (_P - 1) // 4, _P)
+
+
+def _rx(y, sign):
+    if y >= _P:
+        return None
+    x2 = (y * y - 1) * _inv(_D * y * y + 1)
+    if x2 == 0:
+        return None if sign else 0
+    x = pow(x2, (_P + 3) // 8, _P)
+    if (x * x - x2) % _P:
+        x = x * _I % _P
+    if (x * x - x2) % _P:
+        return None
+    if (x & 1) != sign:
+        x = _P - x
+    return x
+
+
+_GY = 4 * _inv(5) % _P
+_GX = _rx(_GY, 0)
+_G = (_GX, _GY, 1, _GX * _GY % _P)
+
+
+def _add(a, b):
+    A = (a[1] - a[0]) * (b[1] - b[0]) % _P
+    B = (a[1] + a[0]) * (b[1] + b[0]) % _P
+    C = 2 * a[3] * b[3] * _D % _P
+    D = 2 * a[2] * b[2] % _P
+    E, F, G, H = B - A, D - C, D + C, B + A
+    return (E * F % _P, G * H % _P, F * G % _P, E * H % _P)
+
+
+def _mul(s, pt):
+    q = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1:
+            q = _add(q, pt)
+        pt = _add(pt, pt)
+        s >>= 1
+    return q
+
+
+def _eq(a, b):
+    return (a[0] * b[2] - b[0] * a[2]) % _P == 0 and (a[1] * b[2] - b[1] * a[2]) % _P == 0
+
+
+def _comp(pt):
+    z = _inv(pt[2])
+    x, y = pt[0] * z % _P, pt[1] * z % _P
+    return int.to_bytes(y | ((x & 1) << 255), 32, "little")
+
+
+def _decomp(s):
+    if len(s) != 32:
+        return None
+    y = int.from_bytes(s, "little")
+    sign = y >> 255
+    y &= (1 << 255) - 1
+    x = _rx(y, sign)
+    return None if x is None else (x, y, 1, x * y % _P)
+
+
+def _h(m):
+    return int.from_bytes(_hl.sha512(m).digest(), "little") % _Q
+
+
+def _expand(seed):
+    h = _hl.sha512(seed).digest()
+    a = int.from_bytes(h[:32], "little")
+    a &= (1 << 254) - 8
+    a |= 1 << 254
+    return a, h[32:]
+
+
+def ed_public(seed):
+    return _comp(_mul(_expand(seed)[0], _G))
+
+
+def ed_sign(seed, msg):
+    a, prefix = _expand(seed)
+    A = _comp(_mul(a, _G))
+    r = _h(prefix + msg)
+    R = _comp(_mul(r, _G))
+    s = (r + _h(R + A + msg) * a) % _Q
+    return R + int.to_bytes(s, 32, "little")
+
+
+def ed_verify(pub, msg, sig):
+    try:
+        if len(pub) != 32 or len(sig) != 64:
+            return False
+        A = _decomp(pub)
+        R = _decomp(sig[:32])
+        if A is None or R is None:
+            return False
+        s = int.from_bytes(sig[32:], "little")
+        if s >= _Q:
+            return False
+        h = _h(sig[:32] + pub + msg)
+        return _eq(_mul(s, _G), _add(R, _mul(h, A)))
+    except Exception:
+        return False
+
+
+SIG_TAG = b"\n# DS-SIG:"
+
+
+def code_sig_ok(data):
+    """Kod oxiridagi '# DS-SIG:<hex>' imzosi dasturchi kaliti bilan mosmi?"""
+    try:
+        i = data.rfind(SIG_TAG)
+        if i < 0:
+            return False
+        sig = bytes.fromhex(data[i + len(SIG_TAG):].strip().decode("ascii"))
+        return ed_verify(LIC_PUB, b"UPD1|" + _hl.sha256(data[:i]).digest(), sig)
+    except Exception:
+        return False
+
+
+def _machine_raw():
+    parts = []
+    try:
+        if os.name == "nt":
+            import winreg
+            try:
+                k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography", 0,
+                                   winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
+                parts.append(str(winreg.QueryValueEx(k, "MachineGuid")[0]))
+            except Exception:
+                pass
+            try:
+                import ctypes
+                ser = ctypes.c_uint32(0)
+                ctypes.windll.kernel32.GetVolumeInformationW(ctypes.c_wchar_p(os.environ.get("SystemDrive", "C:") + "\\"),
+                                                             None, 0, ctypes.byref(ser), None, None, None, 0)
+                parts.append("%08x" % ser.value)
+            except Exception:
+                pass
+            try:
+                k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+                parts.append(str(winreg.QueryValueEx(k, "ProcessorNameString")[0]).strip())
+            except Exception:
+                pass
+        else:
+            for f in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+                try:
+                    with open(f) as fh:
+                        parts.append(fh.read().strip())
+                        break
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    if not parts:
+        import uuid
+        parts.append("mac%012x" % uuid.getnode())
+    return "|".join(parts)
+
+
+def machine_id():
+    return _hl.sha256(b"DS-MID|" + _machine_raw().encode("utf-8", "replace")).digest()[:8]
+
+
+def machine_id_str():
+    h = machine_id().hex().upper()
+    return "-".join(h[i:i + 4] for i in range(0, 16, 4))
+
+
+LIC_FILES = [os.path.join(os.path.expanduser("~"), ".dublyaj_studio", "lic.dat"),
+             os.path.join(os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".cache"), "dsl.bin")]
+LIC_REG = r"Software\Dublyaj\Studio"
+
+
+def _st_key():
+    return _hl.sha256(b"DS-ST|" + _machine_raw().encode("utf-8", "replace") + LIC_PUB).digest()
+
+
+def _st_pack(d):
+    import hmac
+    import base64
+    body = json.dumps(d, sort_keys=True).encode()
+    return base64.b64encode(hmac.new(_st_key(), body, _hl.sha256).digest() + body).decode()
+
+
+def _st_unpack(s):
+    import hmac
+    import base64
+    try:
+        raw = base64.b64decode(s.strip())
+        mac, body = raw[:32], raw[32:]
+        if not hmac.compare_digest(mac, hmac.new(_st_key(), body, _hl.sha256).digest()):
+            return None
+        d = json.loads(body.decode())
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def _st_load():
+    out = []
+    for f in LIC_FILES:
+        try:
+            with open(f, encoding="ascii") as fh:
+                d = _st_unpack(fh.read())
+                if d:
+                    out.append(d)
+        except OSError:
+            pass
+    if os.name == "nt":
+        try:
+            import winreg
+            k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, LIC_REG)
+            d = _st_unpack(str(winreg.QueryValueEx(k, "State")[0]))
+            if d:
+                out.append(d)
+        except Exception:
+            pass
+    return out
+
+
+def _st_save(d):
+    s = _st_pack(d)
+    for f in LIC_FILES:
+        try:
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            with open(f, "w", encoding="ascii") as fh:
+                fh.write(s)
+        except OSError:
+            pass
+    if os.name == "nt":
+        try:
+            import winreg
+            k = winreg.CreateKey(winreg.HKEY_CURRENT_USER, LIC_REG)
+            winreg.SetValueEx(k, "State", 0, winreg.REG_SZ, s)
+        except Exception:
+            pass
+
+
+def lic_parse(keystr):
+    """Kalit matnini tekshiradi. Imzo noto'g'ri bo'lsa ValueError. Qaytaradi: dict."""
+    import base64
+    import struct
+    t = (keystr or "").strip().upper()
+    if t.startswith("DSK-"):
+        t = t[4:]
+    t = re.sub(r"[^A-Z2-7]", "", t)
+    try:
+        raw = base64.b32decode(t + "=" * (-len(t) % 8))
+    except Exception:
+        raise ValueError("Kalit formati noto'g'ri.")
+    if len(raw) < 64 + 25:
+        raise ValueError("Kalit to'liq emas (nusxalashda uzilgan bo'lishi mumkin).")
+    payload, sig = raw[:-64], raw[-64:]
+    if not ed_verify(LIC_PUB, b"LIC1|" + payload, sig):
+        raise ValueError("Kalit noto'g'ri (imzo mos kelmadi).")
+    try:
+        ver, kid, issued, act_by, days, flags, mach, nl = struct.unpack(">B4sIIHB8sB", payload[:25])
+        name = payload[25:25 + nl].decode("utf-8", "replace")
+    except Exception:
+        raise ValueError("Kalit buzilgan.")
+    if ver != 1:
+        raise ValueError("Kalit versiyasi qo'llab-quvvatlanmaydi.")
+    return dict(kid=kid.hex(), issued=issued, act_by=act_by, days=days, any=bool(flags & 1), machine=mach,
+                name=name, key="DSK-" + "-".join(t[i:i + 6] for i in range(0, len(t), 6)))
+
+
+def _lic_for_machine(info):
+    return info["any"] or info["machine"] == machine_id()
+
+
+def _net_time():
+    """Internet bo'lsa haqiqiy vaqt (soat o'zgartirilganini aniqlash uchun). Yo'q bo'lsa None."""
+    try:
+        import urllib.request
+        from email.utils import parsedate_to_datetime
+        r = urllib.request.urlopen(urllib.request.Request("https://api.github.com", method="HEAD",
+                                   headers={"User-Agent": "DublyajStudio"}), timeout=4)
+        return parsedate_to_datetime(r.headers["Date"]).timestamp()
+    except Exception:
+        try:
+            import urllib.request
+            from email.utils import parsedate_to_datetime
+            r = urllib.request.urlopen(urllib.request.Request("https://www.google.com", method="HEAD"), timeout=4)
+            return parsedate_to_datetime(r.headers["Date"]).timestamp()
+        except Exception:
+            return None
+
+
+_LIC_CACHE = {"t": 0.0, "v": None}
+
+
+def lic_status(force=False):
+    """(ok, info, xabar). info: name, expiry, days_left."""
+    now = time.time()
+    if not force and _LIC_CACHE["v"] is not None and now - _LIC_CACHE["t"] < 20:
+        return _LIC_CACHE["v"]
+    res = _lic_status(now)
+    _LIC_CACHE["t"], _LIC_CACHE["v"] = now, res
+    return res
+
+
+def _lic_status(now):
+    best, seen = None, 0.0
+    for st in _st_load():
+        try:
+            info = lic_parse(st["key"])
+            if not _lic_for_machine(info):
+                continue
+            act = float(st["act"])
+            seen = max(seen, float(st.get("seen", act)))
+            if best is None or (info["issued"], -act) > (best[0]["issued"], -best[1]):
+                best = (info, act)
+        except Exception:
+            continue
+    if best is None:
+        return False, None, "Dastur aktivlashtirilmagan."
+    info, act = best
+    if now < seen - 86400:
+        return False, None, "Kompyuter soati orqaga o'zgartirilgan. Soatni to'g'rilang."
+    expiry = act + info["days"] * 86400
+    if now > expiry:
+        return False, None, "Litsenziya muddati tugagan. Yangi kalit oling."
+    if now > seen + 600:
+        _st_save({"key": info["key"], "act": act, "seen": now})
+    return True, dict(name=info["name"], expiry=expiry, days_left=int((expiry - now) // 86400) + 1), ""
+
+
+def lic_activate(keystr):
+    """Kalitni tekshirib aktivlashtiradi. Xato bo'lsa ValueError."""
+    info = lic_parse(keystr)
+    if not _lic_for_machine(info):
+        raise ValueError("Bu kalit boshqa kompyuter uchun berilgan (Mashina ID mos emas).")
+    now = time.time()
+    act = None
+    for st in _st_load():
+        try:
+            if lic_parse(st["key"])["kid"] == info["kid"]:
+                act = float(st["act"]) if act is None else min(act, float(st["act"]))
+        except Exception:
+            pass
+    if act is None:
+        if int(now // 86400) > info["act_by"]:
+            raise ValueError("Bu kalitni aktivlashtirish muddati o'tgan. Yangi kalit oling.")
+        nt = _net_time()
+        if nt and abs(nt - now) > 2 * 86400:
+            raise ValueError("Kompyuter soati noto'g'ri. Sana va vaqtni to'g'rilab qayta urinib ko'ring.")
+        act = now
+    if now > act + info["days"] * 86400:
+        raise ValueError("Litsenziya muddati tugagan. Yangi kalit oling.")
+    _st_save({"key": info["key"], "act": act, "seen": now})
+    _LIC_CACHE["v"] = None
+    return lic_status(True)
+
+
+def lic_require():
+    ok, _info, msg = lic_status()
+    if not ok:
+        raise RuntimeError("Litsenziya: " + msg)
+
+
 
 # ----------------------------------------------------------------------------------------
 #  YANGILASH (UPDATE): EXE ni qayta build qilmasdan dasturni yangilash
@@ -64,8 +444,11 @@ def _run_override():
     try:
         if not os.path.isfile(UPD_FILE):
             return False
-        with open(UPD_FILE, "r", encoding="utf-8") as f:
-            txt = f.read()
+        with open(UPD_FILE, "rb") as f:
+            raw = f.read()
+        if not code_sig_ok(raw):                    # imzosiz / begona kod ishga tushirilmaydi
+            raise ValueError("imzo")
+        txt = raw.decode("utf-8")
         v = src_version(txt)
         if not v or vtuple(v) <= vtuple(APP_VERSION):
             return False
@@ -1426,6 +1809,7 @@ class Processor:
         out_tmp = None
         try:
             self.t0 = time.time()
+            lic_require()
             if not self.ffmpeg or not self.ffprobe:
                 raise RuntimeError("FFmpeg/FFprobe topilmadi.")
             if not os.path.isfile(st.src):
@@ -5074,6 +5458,8 @@ def upd_check(url, cb=None):
 
 def upd_install(code, force=False):
     """Yangi kodni tekshirib (sintaksis + versiya) yangilanish papkasiga yozadi. Qaytaradi: o'rnatilgan versiya."""
+    if not code_sig_ok(code):
+        raise ValueError("Yangilanish imzosi noto'g'ri yoki yo'q — bu fayl dasturchi tomonidan berilmagan. O'rnatilmadi.")
     text = code.decode("utf-8", "replace").lstrip("\ufeff")
     ver = src_version(text)
     if not ver:
@@ -5902,6 +6288,7 @@ def run_gui(on_ready=None):
             self.protocol("WM_DELETE_WINDOW", self._close)
             self.after(100, self._poll)
             self.after(1200, self._auto_update_check)
+            self.after(240000, self._lic_tick)
             if not (self.ffmpeg and self.ffprobe):
                 self.after(400, self._need_ffmpeg)
             else:
@@ -6617,7 +7004,23 @@ def run_gui(on_ready=None):
                 if "To'xtat" not in msg:
                     messagebox.showerror(APP_NAME, msg[:900])
 
+        def _lic_tick(self):
+            """Dastur ochiq turganda ham muddatni qayta tekshiradi."""
+            ok, _i, msg = lic_status(True)
+            if not ok:
+                try:
+                    messagebox.showerror(APP_NAME, msg + "\n\nDastur yopiladi.")
+                finally:
+                    self.destroy()
+                return
+            self.after(240000, self._lic_tick)
+
         def _open_tool(self, key, cls):
+            try:
+                lic_require()
+            except RuntimeError as e:
+                messagebox.showerror(APP_NAME, str(e))
+                return
             w = self.tools.get(key)
             try:
                 if w is not None and w.winfo_exists():
@@ -6673,7 +7076,11 @@ def run_gui(on_ready=None):
             tk.Label(dlg, image=logo_image(96, dlg), bg=BG).pack(padx=40, pady=(22, 6))
             tk.Label(dlg, text=APP_NAME + "  v" + APP_VERSION, bg=BG, fg="white", font=("Segoe UI", 18, "bold")).pack()
             tk.Label(dlg, text="Dublyaj studiyalari uchun professional vositalar to'plami", bg=BG, fg=MUTED).pack(pady=(2, 4))
-            tk.Label(dlg, text="Dasturchi: Muhammad Ali", bg=BG, fg="white", font=("Segoe UI", 11, "bold")).pack(pady=(0, 10))
+            tk.Label(dlg, text="Dasturchi: Muhammad Ali", bg=BG, fg="white", font=("Segoe UI", 11, "bold")).pack(pady=(0, 4))
+            _ok, _li, _m = lic_status()
+            if _ok:
+                tk.Label(dlg, text="Litsenziya: %s  |  %d kun qoldi  |  ID: %s" % (_li["name"], _li["days_left"], machine_id_str()),
+                         bg=BG, fg=GREEN, font=("Segoe UI", 9)).pack(pady=(0, 10))
             for t in ("•  Dublyaj: original vokalni o'chirish, ducking, 5.1 / 2.0, tez AI (MDX-Net)",
                       "•  Intro qo'shuvchi: kino boshiga reklama (kino sifati o'zgarmaydi)",
                       "•  Yuklovchi: M3U8 (HLS), to'g'ridan-to'g'ri havolalar, video sahifalar"):
@@ -6731,6 +7138,84 @@ def run_gui(on_ready=None):
             self._save_cfg()
             self.destroy()
 
+    def license_gate():
+        """Aktivlashtirish oynasi: to'g'ri kalit kiritilmaguncha dastur ochilmaydi, oyna yopilsa dastur yopiladi."""
+        ok, _i, _m = lic_status(True)
+        if ok:
+            return True
+        root = tk.Tk()
+        root.title("Aktivlashtirish — " + APP_NAME)
+        root.configure(bg=BG)
+        root.resizable(False, False)
+        w, h = 600, 560
+        root.geometry("%dx%d+%d+%d" % (w, h, (root.winfo_screenwidth() - w) // 2, max(20, (root.winfo_screenheight() - h) // 2 - 30)))
+        try:
+            root.iconphoto(False, logo_image(64, root))
+        except Exception:
+            pass
+        res = {"ok": False}
+        tk.Label(root, image=logo_image(80, root), bg=BG).pack(pady=(22, 4))
+        tk.Label(root, text="Dasturni aktivlashtirish", bg=BG, fg="white", font=("Segoe UI", 18, "bold")).pack()
+        tk.Label(root, text="Dasturni ishlatish uchun litsenziya kalitini kiriting.", bg=BG, fg=MUTED,
+                 font=("Segoe UI", 10)).pack(pady=(2, 12))
+        tk.Label(root, text="Sizning Mashina ID (kalit olish uchun dasturchiga yuboring):", bg=BG, fg=FG,
+                 font=("Segoe UI", 9)).pack(anchor="w", padx=28)
+        row = tk.Frame(root, bg=BG)
+        row.pack(fill="x", padx=28, pady=(2, 10))
+        mid = tk.Entry(row, font=("Consolas", 13, "bold"), relief="flat", bg="#14151a", fg="#7fd1ff",
+                       readonlybackground="#14151a", justify="center")
+        mid.insert(0, machine_id_str())
+        mid.configure(state="readonly")
+        mid.pack(side="left", fill="x", expand=True, ipady=6)
+
+        def copy_id():
+            root.clipboard_clear()
+            root.clipboard_append(machine_id_str())
+            st.configure(text="Mashina ID nusxalandi.", fg=GREEN)
+        tk.Button(row, text="Nusxalash", command=copy_id, relief="flat", bg="#2f3140", fg=FG, activebackground="#3a3d4c",
+                  activeforeground="white", padx=12).pack(side="left", padx=(8, 0), ipady=3)
+        tk.Label(root, text="Litsenziya kaliti:", bg=BG, fg=FG, font=("Segoe UI", 9)).pack(anchor="w", padx=28)
+        txt = tk.Text(root, height=6, wrap="char", font=("Consolas", 10), relief="flat", bg="#14151a", fg=FG,
+                      insertbackground="white", highlightthickness=1, highlightbackground="#3a3d4c", highlightcolor=ACC,
+                      padx=8, pady=6)
+        txt.pack(fill="x", padx=28, pady=(2, 6))
+        st = tk.Label(root, text="", bg=BG, fg=RED, wraplength=540, justify="left", font=("Segoe UI", 10))
+        st.pack(anchor="w", padx=28, pady=(0, 6))
+
+        def go(_e=None):
+            k = txt.get("1.0", "end").strip()
+            if not k:
+                st.configure(text="Kalitni kiriting.", fg=RED)
+                return "break"
+            try:
+                lic_activate(k)
+            except ValueError as e:
+                st.configure(text=str(e), fg=RED)
+                return "break"
+            except Exception as e:                      # noqa
+                st.configure(text="Xato: " + str(e)[:200], fg=RED)
+                return "break"
+            res["ok"] = True
+            root.destroy()
+            return "break"
+        bf = tk.Frame(root, bg=BG)
+        bf.pack(pady=(6, 10))
+        tk.Button(bf, text="Aktivlashtirish", command=go, relief="flat", bg=ACC, fg="white", activebackground="#6aa0ff",
+                  activeforeground="white", font=("Segoe UI", 11, "bold"), padx=26, pady=8).pack(side="left", padx=6)
+        tk.Button(bf, text="Chiqish", command=root.destroy, relief="flat", bg="#3a3d4c", fg=FG, activebackground="#4a4e60",
+                  activeforeground="white", font=("Segoe UI", 11), padx=26, pady=8).pack(side="left", padx=6)
+        tk.Label(root, text="Dasturchi: Muhammad Ali", bg=BG, fg=MUTED, font=("Segoe UI", 9)).pack(side="bottom", pady=8)
+        txt.focus_set()
+        root.protocol("WM_DELETE_WINDOW", root.destroy)
+        root.mainloop()
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return res["ok"] and lic_status(True)[0]
+
+    if not license_gate():
+        return
     app = App()
     if on_ready:
         app.after(300, lambda: on_ready(app))
