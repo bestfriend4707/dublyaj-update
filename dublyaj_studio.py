@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.7"
+APP_VERSION = "1.8"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -225,6 +225,36 @@ def machine_id_str():
     return "-".join(h[i:i + 4] for i in range(0, 16, 4))
 
 
+REVOKE_URL = ""   # make_release.py --revoke-url bilan avtomatik to'ldiriladi (bekor qilingan kalitlar ro'yxati, version.json kabi repoda)
+_REVOKE_CACHE_FILE = os.path.join(os.path.expanduser("~"), ".dublyaj_studio", "revoked.json")
+
+
+def _revoked_ids():
+    """Bekor qilingan kalitlar ro'yxati (imzolangan). Internet bo'lsa yangilanadi, bo'lmasa oxirgi ma'lum ro'yxat ishlatiladi."""
+    cached = {"ids": [], "t": 0}
+    try:
+        with open(_REVOKE_CACHE_FILE, encoding="utf-8") as f:
+            cached = json.load(f)
+    except (OSError, ValueError):
+        pass
+    if REVOKE_URL and time.time() - cached.get("t", 0) > 3600:
+        try:
+            raw = upd_fetch(REVOKE_URL, timeout=6)
+            d = json.loads(raw.decode("utf-8"))
+            sig = bytes.fromhex(d["sig"])
+            if ed_verify(LIC_PUB, b"REV1|" + json.dumps(d["ids"], separators=(",", ":")).encode(), sig):
+                cached = {"ids": d["ids"], "t": time.time()}
+                try:
+                    os.makedirs(os.path.dirname(_REVOKE_CACHE_FILE), exist_ok=True)
+                    with open(_REVOKE_CACHE_FILE, "w", encoding="utf-8") as f:
+                        json.dump(cached, f)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+    return set(cached.get("ids", []))
+
+
 LIC_FILES = [os.path.join(os.path.expanduser("~"), ".dublyaj_studio", "lic.dat"),
              os.path.join(os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".cache"), "dsl.bin")]
 LIC_REG = r"Software\Dublyaj\Studio"
@@ -374,6 +404,8 @@ def _lic_status(now):
     if best is None:
         return False, None, "Dastur aktivlashtirilmagan."
     info, act = best
+    if info["kid"] in _revoked_ids():
+        return False, None, "Bu kalit bekor qilingan. Yangi kalit uchun dasturchiga murojaat qiling."
     if now < seen - 86400:
         return False, None, "Kompyuter soati orqaga o'zgartirilgan. Soatni to'g'rilang."
     expiry = act + info["days"] * 86400
@@ -7360,4 +7392,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# DS-SIG:37fa384a8f47b9c079d3c28b7d6e9de4b2ebef2c14dc333c3c2a13439aff7fba3902b8855c75a30e9ae20e2e7640f5ffbafd3af0cb0c38f52369429bc214e200
+# DS-SIG:f90decc75c7ff80a9f53fb2c8d9c07bc9cc09ca5e34fabada0c4f60198721eb87895f6019517b57ae25c9dd4f2e6978183744e2e58a3ec5348a8fc3c9989050e
