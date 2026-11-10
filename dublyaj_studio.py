@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.5"
+APP_VERSION = "1.6"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -4990,7 +4990,20 @@ def gh_norm(url):
     return u
 
 
-def upd_fetch(url, timeout=25):
+def _read_all(r, cb=None):
+    total = int(r.headers.get("Content-Length") or 0) if hasattr(r, "headers") else 0
+    buf = bytearray()
+    while True:
+        ch = r.read(65536)
+        if not ch:
+            break
+        buf += ch
+        if cb:
+            cb(len(buf), total)
+    return bytes(buf)
+
+
+def upd_fetch(url, timeout=25, cb=None):
     """URL, file:// yoki mahalliy fayl yo'li -> bytes."""
     import urllib.request
     u = gh_norm(url)
@@ -5009,7 +5022,7 @@ def upd_fetch(url, timeout=25):
             h["Authorization"] = "Bearer " + tok
         try:
             with urllib.request.urlopen(urllib.request.Request(api, headers=h), timeout=timeout) as r:
-                return r.read()
+                return _read_all(r, cb)
         except urllib.error.HTTPError as e:
             if e.code in (401, 403, 404):
                 raise ValueError("GitHub: kirish rad etildi (%d). Repo nomi, fayl yoki Token noto'g'ri bo'lishi mumkin "
@@ -5023,15 +5036,15 @@ def upd_fetch(url, timeout=25):
             return f.read()
     req = urllib.request.Request(u, headers={"User-Agent": "DublyajStudio-updater", "Cache-Control": "no-cache"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+        return _read_all(r, cb)
 
 
-def upd_check(url):
+def upd_check(url, cb=None):
     """Yangilanish manbasini o'qiydi. Manba: version.json (tavsiya) yoki to'g'ridan-to'g'ri dublyaj_studio.py.
     Qaytaradi: {version, notes, sha256, code(bytes), newer(bool)}"""
     import urllib.parse
     import hashlib
-    data = upd_fetch(url)
+    data = upd_fetch(url) if cb is None else upd_fetch(url)
     text = data.decode("utf-8", "replace").lstrip("\ufeff")
     if text.lstrip().startswith("{"):
         m = json.loads(text)
@@ -5045,7 +5058,7 @@ def upd_check(url):
                 code_url = url.rsplit("/", 1)[0] + "/" + code_url
             else:
                 code_url = urllib.parse.urljoin(url, code_url) if "://" in url else os.path.join(os.path.dirname(url), code_url)
-        code = upd_fetch(code_url)
+        code = upd_fetch(code_url, cb=cb)
         sha = (m.get("sha256") or "").lower()
         notes = m.get("notes", "")
     else:
@@ -5116,7 +5129,7 @@ def restart_app():
 
 
 def make_update_window(tk, ttk, filedialog, messagebox, T):
-    """Yangilash oynasi (dastur ichidagi alohida oyna)."""
+    """Yangilash oynasi: bitta tugma, jarayon va log."""
     BG, CARD, FG, MUTED, ACC = T["BG"], T["CARD"], T["FG"], T["MUTED"], T["ACC"]
 
     class UpdateWindow(tk.Toplevel):
@@ -5125,74 +5138,41 @@ def make_update_window(tk, ttk, filedialog, messagebox, T):
             self.app = master
             self.title("Yangilash")
             self.configure(bg=BG)
-            self.geometry("760x720")
-            self.minsize(680, 640)
+            self.geometry("560x470")
+            self.minsize(500, 420)
             try:
                 self.iconphoto(False, logo_image(64, self))
             except Exception:
                 pass
-            cfg = upd_cfg_load()
-            self.v_url = tk.StringVar(value=cfg.get("url", ""))
-            self.v_auto = tk.BooleanVar(value=cfg.get("auto", True))
-            self.v_tok = tk.StringVar(value=cfg.get("token", ""))
-            self.found = None
             self.q = queue.Queue()
+            self.busy = False
             hd = tk.Frame(self, bg="#23252f")
             hd.pack(fill="x")
             tk.Label(hd, image=logo_image(48, self), bg="#23252f").pack(side="left", padx=(16, 10), pady=10)
             tx = tk.Frame(hd, bg="#23252f")
             tx.pack(side="left", pady=8)
             tk.Label(tx, text="Yangilash", bg="#23252f", fg="white", font=("Segoe UI", 16, "bold")).pack(anchor="w")
-            tk.Label(tx, text="Dasturni qayta build qilmasdan yangilang", bg="#23252f", fg=MUTED,
+            tk.Label(tx, text="Joriy versiya: %s" % APP_VERSION, bg="#23252f", fg=MUTED,
                      font=("Segoe UI", 9)).pack(anchor="w")
             tk.Frame(self, bg="#e0a030", height=2).pack(fill="x")
 
-            f = ttk.LabelFrame(self, text="Joriy holat")
-            f.pack(fill="x", padx=12, pady=(10, 4))
-            iv = upd_installed_version()
-            src = ("Yangilangan nusxa (%s)" % iv) if iv and vtuple(iv) > (0,) and APP_VERSION == iv else "Dasturning asl (EXE ichidagi) nusxasi"
-            ttk.Label(f, text="Versiya:  %s" % APP_VERSION, font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=10, pady=(6, 0))
-            ttk.Label(f, text="Manba:  %s" % src, style="Muted.TLabel").pack(anchor="w", padx=10, pady=(0, 6))
-
-            g = ttk.LabelFrame(self, text="1) Internet orqali yangilash")
-            g.pack(fill="x", padx=12, pady=4)
-            g.columnconfigure(0, weight=1)
-            ttk.Label(g, text="GitHub repo (login/repo, masalan ali/dublyaj-update) yoki version.json havolasi:").grid(row=0, column=0, sticky="w", padx=10, pady=(6, 0))
-            ttk.Entry(g, textvariable=self.v_url).grid(row=1, column=0, columnspan=3, sticky="ew", padx=10, pady=4)
-            ttk.Label(g, text="Token (private repo uchun, github_pat_...):").grid(row=2, column=0, sticky="w", padx=10)
-            ttk.Entry(g, textvariable=self.v_tok, show="*").grid(row=3, column=0, columnspan=3, sticky="ew", padx=10, pady=4)
-            b = ttk.Frame(g)
-            b.grid(row=4, column=0, columnspan=3, sticky="w", padx=10, pady=(2, 8))
-            self.b_check = self._ib(b, "Tekshirish", "refresh", self.check)
-            self.b_check.pack(side="left", padx=(0, 6))
-            self.b_inst = self._ib(b, "Yangilash", "download", self.install_remote, "Accent.TButton")
-            self.b_inst.configure(state="disabled")
-            self.b_inst.pack(side="left", padx=6)
-            ttk.Checkbutton(b, text="Dastur ochilganda avtomatik tekshirish", variable=self.v_auto).pack(side="left", padx=12)
-
-            h = ttk.LabelFrame(self, text="2) Fayldan yangilash (internet / hosting kerak emas)")
-            h.pack(fill="x", padx=12, pady=4)
-            ttk.Label(h, text="Yangi dublyaj_studio.py faylini tanlang (masalan Telegram / flesh orqali kelgan).",
-                      style="Muted.TLabel").pack(anchor="w", padx=10, pady=(6, 2))
-            hb = ttk.Frame(h)
-            hb.pack(anchor="w", padx=10, pady=(2, 8))
-            self._ib(hb, "Fayl tanlash va yangilash...", "file", self.install_file).pack(side="left", padx=(0, 6))
-            self._ib(hb, "Asl holatga qaytarish", "trash", self.rollback).pack(side="left", padx=6)
-
-            ttk.Label(self, text="Natija", style="Muted.TLabel").pack(anchor="w", padx=14, pady=(8, 0))
+            top = ttk.Frame(self)
+            top.pack(fill="x", padx=16, pady=(16, 6))
+            self.btn = ttk.Button(top, text=" Yangilash", image=icon_image("download", 20, "#ffffff", self), compound="left",
+                                  style="Accent.TButton", command=self.go)
+            self.btn.pack(fill="x", ipady=8)
+            self.pb = ttk.Progressbar(self, maximum=1000, mode="determinate")
+            self.pb.pack(fill="x", padx=16, pady=(8, 2))
+            self.lbl = ttk.Label(self, text="Tayyor", style="Muted.TLabel")
+            self.lbl.pack(anchor="w", padx=16)
             lf = ttk.Frame(self)
-            lf.pack(fill="both", expand=True, padx=12, pady=(2, 12))
+            lf.pack(fill="both", expand=True, padx=16, pady=(8, 16))
             self.txt = tk.Text(lf, height=8, wrap="word", state="disabled", bg="#14151a", fg=FG, relief="flat",
                                highlightthickness=1, highlightbackground="#3a3d4c", highlightcolor=ACC,
                                font=("Consolas", 10), padx=8, pady=6)
             self.txt.pack(fill="both", expand=True)
-            self.protocol("WM_DELETE_WINDOW", self._close)
-            self.after(150, self._poll)
-            self._log("Joriy versiya: %s. Yangilanish manzilini kiriting va 'Tekshirish' ni bosing." % APP_VERSION)
-
-        def _ib(self, parent, text, icon, cmd, style="TButton"):
-            return ttk.Button(parent, text=" " + text, image=icon_image(icon, 18, "#ffffff" if style != "TButton" else FG, self),
-                              compound="left", command=cmd, style=style)
+            self.after(120, self._poll)
+            self._log("Yangilanishni tekshirish uchun 'Yangilash' tugmasini bosing.")
 
         def _log(self, m):
             self.txt.configure(state="normal")
@@ -5200,96 +5180,85 @@ def make_update_window(tk, ttk, filedialog, messagebox, T):
             self.txt.see("end")
             self.txt.configure(state="disabled")
 
-        def _save(self):
-            c = upd_cfg_load()
-            c.update(url=self.v_url.get().strip(), auto=bool(self.v_auto.get()), token=self.v_tok.get().strip())
-            upd_cfg_save(c)
-
-        def _close(self):
-            self._save()
-            self.destroy()
+        def _prog(self, f, text=None):
+            self.pb.configure(mode="determinate")
+            self.pb["value"] = max(0, min(1, f)) * 1000
+            if text:
+                self.lbl.configure(text=text)
 
         def _poll(self):
             try:
                 while True:
-                    k, a = self.q.get_nowait()
+                    k, *a = self.q.get_nowait()
                     if k == "log":
-                        self._log(a)
-                    elif k == "found":
-                        self.found = a
-                        self.b_inst.configure(state="normal" if a["newer"] else "disabled")
-                        self.b_check.configure(state="normal")
-                    elif k == "err":
-                        self._log("XATO: " + a)
-                        self.b_check.configure(state="normal")
-                    elif k == "done":
-                        self.b_check.configure(state="normal")
-                        self._installed(a)
+                        self._log(a[0])
+                    elif k == "prog":
+                        self._prog(*a)
+                    elif k == "end":
+                        self.busy = False
+                        self.btn.configure(state="normal")
+                        if a[0]:
+                            self._ask_restart()
             except queue.Empty:
                 pass
             if self.winfo_exists():
-                self.after(150, self._poll)
+                self.after(120, self._poll)
 
-        def check(self):
-            url = self.v_url.get().strip()
-            if not url:
-                messagebox.showinfo("Yangilash", "Avval yangilanish manzilini (version.json havolasi) kiriting.", parent=self)
+        def _ask_cfg(self):
+            """Birinchi marta: repo va token so'raladi (bir marta, keyin eslab qolinadi)."""
+            from tkinter import simpledialog
+            repo = simpledialog.askstring("Yangilash", "GitHub repo (login/repo):", parent=self)
+            if not repo:
+                return None
+            tok = simpledialog.askstring("Yangilash", "Token (private repo uchun; ochiq bo'lsa bo'sh qoldiring):", parent=self, show="*") or ""
+            c = upd_cfg_load()
+            c.update(url=repo.strip(), token=tok.strip(), auto=True)
+            upd_cfg_save(c)
+            return c
+
+        def go(self):
+            if self.busy:
                 return
-            self._save()
-            self.b_check.configure(state="disabled")
-            self._log("Tekshirilmoqda...")
+            cfg = upd_cfg_load()
+            if not (cfg.get("url") or "").strip():
+                cfg = self._ask_cfg()
+                if not cfg:
+                    return
+            url = cfg["url"].strip()
+            self.busy = True
+            self.btn.configure(state="disabled")
+            self._prog(0.02, "Tekshirilmoqda...")
+            self._log("Yangilanish tekshirilmoqda...")
+            P = self.q.put
 
             def w():
                 try:
-                    r = upd_check(url)
-                    if r["newer"]:
-                        self.q.put(("log", "Yangi versiya mavjud: %s (hozir %s).\n%s" % (r["version"], APP_VERSION, r["notes"] or "")))
-                    else:
-                        self.q.put(("log", "Sizda eng so'nggi versiya (%s). Serverda: %s." % (APP_VERSION, r["version"])))
-                    self.q.put(("found", r))
-                except Exception as e:                # noqa
-                    self.q.put(("err", str(e)[:300]))
+                    P(("prog", 0.1, "Server bilan aloqa..."))
+                    def cb(d, t):
+                        P(("prog", 0.2 + 0.55 * (d / t if t else 0.5), "Yuklanmoqda..."))
+                    r = upd_check(url, cb)
+                    if not r["newer"]:
+                        P(("log", "Sizda eng so'nggi versiya (%s). Serverda: %s." % (APP_VERSION, r["version"])))
+                        P(("prog", 1.0, "Yangilanish kerak emas"))
+                        P(("end", False))
+                        return
+                    P(("log", "Yangi versiya topildi: %s  (hozir %s)" % (r["version"], APP_VERSION)))
+                    if r["notes"]:
+                        P(("log", "Yangiliklar: " + str(r["notes"])))
+                    P(("log", "Hajmi: %.0f KB. Butunlik (sha256) tekshirildi." % (len(r["code"]) / 1024.0)))
+                    P(("prog", 0.85, "O'rnatilmoqda..."))
+                    v = upd_install(r["code"])
+                    P(("log", "TAYYOR: versiya %s o'rnatildi." % v))
+                    P(("prog", 1.0, "Tayyor \u2714 — dasturni qayta ishga tushiring"))
+                    P(("end", True))
+                except Exception as e:                       # noqa
+                    P(("log", "XATO: " + str(e)[:300]))
+                    P(("prog", 0.0, "Xato"))
+                    P(("end", False))
             threading.Thread(target=w, daemon=True).start()
 
-        def install_remote(self):
-            if not self.found or not self.found["newer"]:
-                return
-            try:
-                v = upd_install(self.found["code"])
-            except Exception as e:                    # noqa
-                self._log("XATO: " + str(e))
-                return
-            self.q.put(("done", v))
-
-        def install_file(self):
-            p = filedialog.askopenfilename(parent=self, title="Yangi dublyaj_studio.py", filetypes=[("Python", "*.py"), ("Hammasi", "*.*")])
-            if not p:
-                return
-            try:
-                with open(p, "rb") as f:
-                    code = f.read()
-                v = upd_install(code)
-            except Exception as e:                    # noqa
-                messagebox.showerror("Yangilash", str(e), parent=self)
-                self._log("XATO: " + str(e))
-                return
-            self.q.put(("done", v))
-
-        def rollback(self):
-            if upd_rollback():
-                self._log("Yangilangan nusxa o'chirildi. Qayta ishga tushirsangiz, asl versiya (%s) ishlaydi." % "EXE ichidagi")
-                self._ask_restart()
-            else:
-                self._log("Qaytariladigan yangilanish yo'q — allaqachon asl holatda.")
-
-        def _installed(self, v):
-            self._log("TAYYOR: versiya %s o'rnatildi." % v)
-            self._ask_restart()
-
         def _ask_restart(self):
-            if messagebox.askyesno("Yangilash", "O'zgarishlar kuchga kirishi uchun dastur qayta ishga tushirilishi kerak.\n\n"
-                                   "Hozir qayta ishga tushirilsinmi?", parent=self):
-                self._save()
+            if messagebox.askyesno("Yangilash", "Yangilanish o'rnatildi.\n\nDastur qayta ishga tushirilsinmi?", parent=self):
                 restart_app()
                 self.app.destroy()
 
@@ -6703,7 +6672,8 @@ def run_gui(on_ready=None):
             dlg.resizable(False, False)
             tk.Label(dlg, image=logo_image(96, dlg), bg=BG).pack(padx=40, pady=(22, 6))
             tk.Label(dlg, text=APP_NAME + "  v" + APP_VERSION, bg=BG, fg="white", font=("Segoe UI", 18, "bold")).pack()
-            tk.Label(dlg, text="Dublyaj studiyalari uchun professional vositalar to'plami", bg=BG, fg=MUTED).pack(pady=(2, 10))
+            tk.Label(dlg, text="Dublyaj studiyalari uchun professional vositalar to'plami", bg=BG, fg=MUTED).pack(pady=(2, 4))
+            tk.Label(dlg, text="Dasturchi: Muhammad Ali", bg=BG, fg="white", font=("Segoe UI", 11, "bold")).pack(pady=(0, 10))
             for t in ("•  Dublyaj: original vokalni o'chirish, ducking, 5.1 / 2.0, tez AI (MDX-Net)",
                       "•  Intro qo'shuvchi: kino boshiga reklama (kino sifati o'zgarmaydi)",
                       "•  Yuklovchi: M3U8 (HLS), to'g'ridan-to'g'ri havolalar, video sahifalar"):
