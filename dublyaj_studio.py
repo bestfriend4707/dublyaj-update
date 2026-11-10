@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.3"
+APP_VERSION = "1.5"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -438,10 +438,56 @@ class MDX:
         self.n = len(self.sessions)
         self.pool = ThreadPoolExecutor(self.n) if self.n > 1 else None
         self.idx = np.arange(self.dim_t)[:, None] * MDX_HOP + np.arange(self.n_fft)[None, :]
+        if self.prov == "CPUExecutionProvider" and self.n >= 4:
+            self._tune(key, log)
+        self.idx = np.arange(self.dim_t)[:, None] * MDX_HOP + np.arange(self.n_fft)[None, :]
         env = np.zeros(self.chunk + self.n_fft, np.float32)
         for t in range(self.dim_t):
             env[t * MDX_HOP:t * MDX_HOP + self.n_fft] += self.win ** 2
         self.env = np.maximum(env, 1e-8)
+
+    def _tune(self, key, log=None):
+        """Ko'p yadroli CPU'da eng tez parallel sessiyalar sonini topadi (giper-oqimlar xotirani to'sib qo'yishi mumkin).
+        Natija bir marta o'lchanib eslab qolinadi."""
+        f = os.path.join(os.path.expanduser("~"), ".dublyaj_studio", "tune.json")
+        tag = "%s-%s-%d" % (key, os.cpu_count(), self.n)
+        try:
+            with open(f, encoding="utf-8") as fh:
+                saved = json.load(fh)
+        except (OSError, ValueError):
+            saved = {}
+        k = saved.get(tag)
+        if not isinstance(k, int) or not 1 <= k <= self.n:
+            x = (np.random.RandomState(2).randn(self.chunk, 2) * 0.05).astype(np.float32)
+            cands = sorted({self.n, max(2, (self.n * 3) // 4), max(2, self.n // 2)}, reverse=True)
+            best, k = None, self.n
+            if log:
+                log("AI tezligi sozlanmoqda (bir martalik, ~20 soniya)...")
+            for c in cands:
+                try:
+                    pool = ThreadPoolExecutor(c)
+                    list(pool.map(lambda i: self.vocals(x, i), range(c)))             # isitish
+                    t0 = time.time()
+                    list(pool.map(lambda i: self.vocals(x, i), range(c)))
+                    per = (time.time() - t0) / c
+                    pool.shutdown()
+                except Exception:                                                     # noqa
+                    break
+                if best is None or per < best * 0.95:                                 # sezilarli yaxshi bo'lsa almashtiriladi
+                    best, k = per, c
+            saved[tag] = k
+            try:
+                os.makedirs(os.path.dirname(f), exist_ok=True)
+                with open(f, "w", encoding="utf-8") as fh:
+                    json.dump(saved, fh)
+            except OSError:
+                pass
+        if k < self.n:
+            self.sessions = self.sessions[:k]
+            self.n = k
+            self.pool = ThreadPoolExecutor(k) if k > 1 else None
+        if log:
+            log(f"AI parallel oqimlar: {self.n}")
 
     def vocals_many(self, xs):
         """Bir nechta bo'lakni parallel ishlaydi (har bir sessiyaga bittadan)."""
@@ -932,7 +978,7 @@ class Settings:
     guided: bool = True          # faqat dublyaj bor joylarda original ovozni o'chirish
     test: bool = False
     test_start: float = 60.0
-    test_len: float = 30.0
+    test_len: float = 120.0
 
 
 # ----------------------------------------------------------------------------------------
@@ -6245,6 +6291,8 @@ def run_gui(on_ready=None):
             self.btn_stop = ttk.Button(b, text="■  STOP", style="Stop.TButton", command=self._stop,
                                        state="disabled")
             self.btn_stop.pack(side="left", padx=8)
+            self.btn_prev = ttk.Button(b, text="\u25b6  Sinov ko'rish", command=self._preview)
+            self.btn_prev.pack(side="left", padx=(8, 0))
             ttk.Button(b, text="Papkani ochish", command=self._open_dir).pack(side="right")
             ttk.Button(b, text="Logni tozalash", command=self._clear_log).pack(side="right", padx=6)
             ttk.Button(b, text="FFmpeg yo'li", command=self._pick_ffmpeg).pack(side="right")
@@ -6328,6 +6376,9 @@ def run_gui(on_ready=None):
                     elif k == "done":
                         ok, msg = a
                         self._finish(ok, msg)
+                    elif k == "pdone":
+                        ok, msg, path = a
+                        self._preview_done(ok, msg, path)
             except queue.Empty:
                 pass
             self.after(100, self._poll)
@@ -6513,6 +6564,7 @@ def run_gui(on_ready=None):
                 pass  # dublyaj yo'q: faqat fon
             self._save_cfg()
             self.btn_start.configure(state="disabled")
+            self.btn_prev.configure(state="disabled")
             self.btn_stop.configure(state="normal")
             self.pb["value"] = 0
             self.lbl_pct.configure(text="0%")
@@ -6522,6 +6574,79 @@ def run_gui(on_ready=None):
                                   progress=lambda f, t: self.q.put(("prog", f, t)))
             self.worker = threading.Thread(target=lambda: self.q.put(("done",) + self.proc.run()), daemon=True)
             self.worker.start()
+
+        def _preview(self):
+            """Sinov: kinoning qisqa qismini hozirgi sozlamalar bilan ishlab, video + natija/original audio yo'li bilan ochadi."""
+            try:
+                st = self._settings()
+            except ValueError as e:
+                messagebox.showerror(APP_NAME, str(e))
+                return
+            if getattr(self, "batch", None) is not None and self.batch.running():
+                messagebox.showinfo(APP_NAME, "Navbat ishlamoqda. Tugashini kuting.")
+                return
+            if not (self.ffmpeg and self.ffprobe):
+                self._need_ffmpeg()
+                return
+            if not st.src or not os.path.isfile(st.src):
+                messagebox.showerror(APP_NAME, "Avval original faylni tanlang.")
+                return
+            import tempfile
+            tdir = os.path.join(tempfile.gettempdir(), "dublyaj_preview")
+            os.makedirs(tdir, exist_ok=True)
+            wav = os.path.join(tdir, "natija.wav")
+            out = os.path.join(tdir, "sinov_video.mkv")
+            for x in (wav, out):
+                try:
+                    os.remove(x)
+                except OSError:
+                    pass
+            st = replace(st, test=True, dst=wav, fmt="WAV 24-bit (PCM)")
+            self._save_cfg()
+            self.btn_start.configure(state="disabled")
+            self.btn_prev.configure(state="disabled")
+            self.btn_stop.configure(state="normal")
+            self.pb["value"] = 0
+            self.lbl_pct.configure(text="0%")
+            self.lbl_stat.configure(text="Sinov tayyorlanmoqda...")
+            self.log("=== SINOV: %s dan %s davomida (hozirgi sozlamalar bilan) ===" % (fmt_time(st.test_start), fmt_time(st.test_len)))
+            self.proc = Processor(st, self.ffmpeg, self.ffprobe,
+                                  log=lambda m: self.q.put(("log", m)),
+                                  progress=lambda f, t: self.q.put(("prog", f, t)))
+
+            def work():
+                try:
+                    ok, msg = self.proc.run()
+                    if not ok or not os.path.isfile(wav):
+                        self.q.put(("pdone", False, msg or "Sinov bajarilmadi", ""))
+                        return
+                    self.q.put(("prog", None, "Sinov video yig'ilmoqda..."))
+                    make_preview(self.ffmpeg, st.src, st.stream, wav, st.test_start, st.test_len, out,
+                                 log=lambda m: self.q.put(("log", m)))
+                    self.q.put(("pdone", True, "", out))
+                except Exception as e:                                  # noqa
+                    self.q.put(("pdone", False, str(e)[:600], ""))
+            self.worker = threading.Thread(target=work, daemon=True)
+            self.worker.start()
+
+        def _preview_done(self, ok, msg, path):
+            self.btn_start.configure(state="normal")
+            self.btn_prev.configure(state="normal")
+            self.btn_stop.configure(state="disabled")
+            self.pb.configure(mode="determinate")
+            if ok:
+                self.pb["value"] = 1000
+                self.lbl_pct.configure(text="100%")
+                self.lbl_stat.configure(text="Sinov tayyor \u2714")
+                self.log("SINOV TAYYOR: " + path)
+                self.log("Player'da 'Audio yo'li' ni almashtirib solishtiring: 1) NATIJA, 2) ORIGINAL. "
+                         "Yoqmasa sozlamani o'zgartirib, 'Sinov ko'rish' ni qayta bosing; yaxshi bo'lsa START.")
+                if not open_file(path):
+                    messagebox.showinfo(APP_NAME, "Sinov video tayyor:\n" + path)
+            else:
+                self.lbl_stat.configure(text="To'xtatildi" if "To'xtat" in msg else "Xato")
+                if "To'xtat" not in msg:
+                    messagebox.showerror(APP_NAME, msg[:900])
 
         def _open_tool(self, key, cls):
             w = self.tools.get(key)
@@ -6614,6 +6739,7 @@ def run_gui(on_ready=None):
 
         def _finish(self, ok, msg):
             self.btn_start.configure(state="normal")
+            self.btn_prev.configure(state="normal")
             self.btn_stop.configure(state="disabled")
             self.pb.configure(mode="determinate")
             if ok:
@@ -6641,11 +6767,85 @@ def run_gui(on_ready=None):
     app.mainloop()
 
 
+def make_preview(ffmpeg, src, stream, wav, start, length, out, log=None):
+    """Sinov video: original videoning shu qismi + 2 ta audio yo'l (1: NATIJA, 2: ORIGINAL). Player'da yo'lni almashtirib solishtiring."""
+    cmd = [ffmpeg, "-y", "-v", "error", "-nostdin", "-ss", "%.3f" % start, "-t", "%.3f" % length, "-i", src,
+           "-i", wav, "-map", "0:v:0?", "-map", "1:a:0", "-map", "0:a:%d" % stream,
+           "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27", "-pix_fmt", "yuv420p",
+           "-vf", "scale=-2:'min(720,ih)'", "-sn", "-dn",
+           "-c:a", "ac3", "-b:a", "448k",
+           "-metadata:s:a:0", "title=NATIJA (dublyaj bilan)", "-metadata:s:a:1", "title=ORIGINAL (asl ovoz)",
+           "-disposition:a:0", "default", "-disposition:a:1", "0", out]
+    if log:
+        log("Sinov video yig'ilmoqda (video + natija + original)...")
+    r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", **({"creationflags": 0x08000000} if os.name == "nt" else {}))
+    if r.returncode != 0 or not os.path.isfile(out):
+        raise RuntimeError("Sinov video yaratilmadi: " + (r.stderr or "")[-400:])
+    return out
+
+
+def open_file(path):
+    try:
+        if os.name == "nt":
+            os.startfile(path)                                    # noqa
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+        return True
+    except Exception:
+        return False
+
+
+def run_bench():
+    lines = [f"{APP_NAME} {APP_VERSION} - AI tezlik sinovi", f"CPU oqimlar soni: {os.cpu_count()}"]
+    try:
+        import onnxruntime as ort
+        lines.append(f"onnxruntime {ort.__version__}, mavjud qurilmalar: {ort.get_available_providers()}")
+        m = MDX("fast")
+        dev = m.prov.replace("ExecutionProvider", "")
+        x = (np.random.RandomState(1).randn(m.chunk, 2) * 0.05).astype(np.float32)
+        m.vocals_many([x] * m.n)                                    # isitish
+        t0 = time.time()
+        reps = 3
+        for _ in range(reps):
+            m.vocals_many([x] * m.n)
+        per = (time.time() - t0) / (reps * m.n)                     # bitta bo'lak uchun samarali vaqt
+        blk = m.chunk / MDX_SR
+        per_hour = per * (3600 / blk) * 0.85
+        lines += [f"AI qurilma: {dev}, parallel oqimlar: {m.n}",
+                  f"Bitta bo'lak ({blk:.1f} s audio): {per:.2f} s",
+                  f"1 soatlik kino uchun AI vaqti taxminan: {per_hour / 60:.1f} daqiqa (5.1 markaz kanal, dublyaj ~85% bo'lsa)"]
+    except Exception as e:                                         # noqa
+        lines.append("XATO: " + str(e)[:300])
+    txt = "\n".join(lines)
+    try:
+        d = os.path.join(os.path.expanduser("~"), ".dublyaj_studio")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "bench.txt"), "w", encoding="utf-8") as f:
+            f.write(txt)
+    except OSError:
+        pass
+    print(txt)
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        r = tk.Tk()
+        r.withdraw()
+        messagebox.showinfo("AI tezlik sinovi", txt)
+        r.destroy()
+    except Exception:
+        pass
+
+
 def main():
     import multiprocessing
     multiprocessing.freeze_support()
     if "--version" in sys.argv:
         print(APP_NAME, APP_VERSION)
+        return
+    if "--bench" in sys.argv:                     # AI tezlik sinovi: natija bench.txt ga yoziladi va oynada ko'rsatiladi
+        run_bench()
         return
     if "--selftest" in sys.argv:                  # EXE to'g'ri yig'ilganini tekshirish: natija selftest.txt ga yoziladi
         lines = [f"{APP_NAME} {APP_VERSION}  (frozen={FROZEN})", f"app_dir: {app_dir()}"]
