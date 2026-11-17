@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.8"
+APP_VERSION = "1.9"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -573,6 +573,27 @@ PRESETS["Frame (studiya darajasi: faqat inson gaplari o'chadi, fon saqlanadi)"] 
 # "Frame": AI faqat nutqni oladi (effekt/shovqin qoladi), dublyaj balandligi o'rtacha (-18 dBFS), past joylari +4 dB gacha tekislanadi.
 # AI rejimida ovoz Demucs bilan ajratiladi: effektlar (eshik, qadam) FC da ham qoladi, shuning uchun
 # qo'shimcha DSP pasaytirishlar yumshatilgan.
+
+PRESETS["Frame+ (faqat inson gaplari o'chadi, fon 100% o'zgarmaydi, Sifatli AI)"] = dict(
+    PRESETS["Frame (studiya darajasi: faqat inson gaplari o'chadi, fon saqlanadi)"],
+    # Dublyaj bor joyda fon/shovqin/effektlar HECH QANAQA pasaytirilmaydi — faqat AI ajratgan
+    # inson ovozi olib tashlanadi, qolgani original holicha qoladi:
+    duck_db=0, bg_db=0, dip_db=0,
+    protect=95,                       # portlash/eshik kabi o'tkinchi effektlarni yanada ko'proq himoyalaydi
+    ai_engine="hq",                   # "Sifatli AI (MDX Voc_FT)" — nutqni eng to'liq ajratadigan dvigatel
+    ai_all=True, guided=True, mask_on=True,
+    # Qoldiq ovoz (AI to'liq olib tashlay olmagan juda oz miqdordagi "sizib chiqish")ni tozalaydi,
+    # lekin haqiqiy fon/effektlarga tegmaydi (bed_keep=100 — fon butunlay saqlanadi):
+    mask_margin=30, mask_max_red=30, mask_release=300, bed_keep=100, bed_margin=14,
+    pad_ms=1000, pad_dip=28,
+    # Dublyaj past bo'lsa, ko'rish paytida eshitilmay qolmasligi uchun biroz ko'tariladi (balans saqlanadi):
+    dub_target=-17, dub_level_up=6, dub_db=0, auto_dub=True,
+    mode="ai", fc="ai")
+# "Frame+": duck_db/bg_db/dip_db = 0 — dublyaj bor joyda original fon/shovqin ASLO pasaytirilmaydi;
+# faqat AI (Sifatli dvigatel) ajratgan inson ovozi to'liq olib tashlanadi. bed_keep=100 bilan
+# niqoblash bosqichi ham haqiqiy fonga tegmaydi, faqat AI qoldirgan nozik vokal izlarini tozalaydi.
+# GPU/CPU tanlovi presetga bog'liq emas — bu avtomatik ravishda o'rnatilgan onnxruntime turi va
+# videokarta mavjudligiga qarab aniqlanadi (boshqa AI presetlar bilan bir xil tarzda).
 
 
 # ----------------------------------------------------------------------------------------
@@ -6859,6 +6880,14 @@ def run_gui(on_ready=None):
                     self.v_aiall.set(bool(v))
                 elif k == "mode":
                     self.v_mode.set(v)
+                elif k == "ai_engine":
+                    self.v_engine.set(ENGINE_LABELS[v])
+                elif k == "guided":
+                    self.v_guided.set(bool(v))
+                elif k == "mask_on":
+                    self.v_mask.set(bool(v))
+                elif k == "auto_dub":
+                    self.v_auto.set(bool(v))
                 else:
                     self.num[k].set(v)
             if self.v_mode.get() == "ai":
@@ -7392,4 +7421,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# DS-SIG:f90decc75c7ff80a9f53fb2c8d9c07bc9cc09ca5e34fabada0c4f60198721eb87895f6019517b57ae25c9dd4f2e6978183744e2e58a3ec5348a8fc3c9989050e
+# DS-SIG:0f1ad81ee2a68fb3a1d7a5e848d057717aacb2d4beb494de9eb7fff5aaeef4ac0e653df8fe5597bc82647b5b83a7a717d3b3a33b19c2506adec6ec71da877d03
