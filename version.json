@@ -1,6 +1,6 @@
 {
-  "version": "1.9",
+  "version": "1.11",
   "url": "dublyaj_studio.py",
-  "sha256": "08ad841bb6b36d56922baa2163f937ccfaa1e09c6e0be7d4f77c8eb126917145",
-  "notes": ""
+  "sha256": "99ef0c5733c2a0259cfbc8b7160a7335c205216e754a8748c453b164df197b4c",
+  "notes": "v1.11: Boshqa kompyuterlarda 'Yangilash' endi hech qanday token/login so'ramaydi (ochiq GitHub manzili orqali avtomatik ishlaydi)."
 }

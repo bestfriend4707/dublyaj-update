@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.9"
+APP_VERSION = "1.11"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -226,6 +226,8 @@ def machine_id_str():
 
 
 REVOKE_URL = ""   # make_release.py --revoke-url bilan avtomatik to'ldiriladi (bekor qilingan kalitlar ro'yxati, version.json kabi repoda)
+DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/bestfriend4707/dublyaj-update/main/version.json"   # make_release.py --update-url bilan avtomatik to'ldiriladi — shu manzil bo'lsa, boshqa
+                           # kompyuterlarda "Yangilash" hech qanday repo/token so'ramaydi (ochiq, token talab qilmaydigan manba bo'lishi kerak)
 _REVOKE_CACHE_FILE = os.path.join(os.path.expanduser("~"), ".dublyaj_studio", "revoked.json")
 
 
@@ -574,26 +576,28 @@ PRESETS["Frame (studiya darajasi: faqat inson gaplari o'chadi, fon saqlanadi)"] 
 # AI rejimida ovoz Demucs bilan ajratiladi: effektlar (eshik, qadam) FC da ham qoladi, shuning uchun
 # qo'shimcha DSP pasaytirishlar yumshatilgan.
 
-PRESETS["Frame+ (faqat inson gaplari o'chadi, fon 100% o'zgarmaydi, Sifatli AI)"] = dict(
+PRESETS["Frame+ (faqat inson gaplari o'chadi, qolgan hammasi 100% o'zgarmaydi)"] = dict(
     PRESETS["Frame (studiya darajasi: faqat inson gaplari o'chadi, fon saqlanadi)"],
     # Dublyaj bor joyda fon/shovqin/effektlar HECH QANAQA pasaytirilmaydi — faqat AI ajratgan
-    # inson ovozi olib tashlanadi, qolgani original holicha qoladi:
+    # inson ovozi olib tashlanadi, qolgani original holicha (bit-aniq) qoladi:
     duck_db=0, bg_db=0, dip_db=0,
-    protect=95,                       # portlash/eshik kabi o'tkinchi effektlarni yanada ko'proq himoyalaydi
-    ai_engine="hq",                   # "Sifatli AI (MDX Voc_FT)" — nutqni eng to'liq ajratadigan dvigatel
-    ai_all=True, guided=True, mask_on=True,
-    # Qoldiq ovoz (AI to'liq olib tashlay olmagan juda oz miqdordagi "sizib chiqish")ni tozalaydi,
-    # lekin haqiqiy fon/effektlarga tegmaydi (bed_keep=100 — fon butunlay saqlanadi):
-    mask_margin=30, mask_max_red=30, mask_release=300, bed_keep=100, bed_margin=14,
-    pad_ms=1000, pad_dip=28,
+    ai_engine="fast",                 # tez AI dvigatel — tezlik uchun (GPU/CPU'da ~3 daq/soat, "hq" 10x sekinroq)
+    ai_all=True, guided=True,
+    # MUHIM: niqoblash (mask) bosqichi O'CHIRILGAN. U — AI dan keyingi QO'SHIMCHA DSP tozalash bo'lib,
+    # ba'zan haqiqiy fon/shovqinni ham "qoldiq nutq" deb xato aniqlab pasaytirib yuborishi mumkin edi.
+    # Frame+ da BUTUNLAY ishonch AI modelga: out = original - AI_ajratgan_ovoz. Shu formula tufayli
+    # fondan/effektlardan birorta namuna ham o'zgartirilmaydi — faqat AI chiqargan "ovoz" qismi ayiriladi.
+    mask_on=False,
+    pad_ms=1000, pad_dip=0,           # qo'shimcha "pad" pasayishi yo'q (u ham mask o'chirilganda butun polosani pasaytirar edi)
     # Dublyaj past bo'lsa, ko'rish paytida eshitilmay qolmasligi uchun biroz ko'tariladi (balans saqlanadi):
     dub_target=-17, dub_level_up=6, dub_db=0, auto_dub=True,
     mode="ai", fc="ai")
-# "Frame+": duck_db/bg_db/dip_db = 0 — dublyaj bor joyda original fon/shovqin ASLO pasaytirilmaydi;
-# faqat AI (Sifatli dvigatel) ajratgan inson ovozi to'liq olib tashlanadi. bed_keep=100 bilan
-# niqoblash bosqichi ham haqiqiy fonga tegmaydi, faqat AI qoldirgan nozik vokal izlarini tozalaydi.
-# GPU/CPU tanlovi presetga bog'liq emas — bu avtomatik ravishda o'rnatilgan onnxruntime turi va
-# videokarta mavjudligiga qarab aniqlanadi (boshqa AI presetlar bilan bir xil tarzda).
+# "Frame+": duck_db/bg_db/dip_db = 0 va mask_on = False — dublyaj bor joyda chiqish aniq
+# "original - AI_ovoz" formulasi bilan hisoblanadi, boshqa hech qanday qo'shimcha pasaytirish/DSP
+# qatlami YO'Q. Shuning uchun fon, shovqin, effektlar bitta ham o'zgarmaydi — faqat AI aniqlagan
+# inson ovozi olinadi. ai_engine="fast" tezlik uchun (Frame bilan bir xil tezlik, taxminan 1 soatlik
+# kinoga bir necha daqiqa). GPU/CPU tanlovi presetga bog'liq emas — bu avtomatik ravishda o'rnatilgan
+# onnxruntime turi va videokarta mavjudligiga qarab aniqlanadi (boshqa AI presetlar bilan bir xil tarzda).
 
 
 # ----------------------------------------------------------------------------------------
@@ -5509,7 +5513,36 @@ def upd_check(url, cb=None):
     return {"version": cv, "notes": notes, "sha256": sha, "code": code, "newer": vtuple(cv) > vtuple(APP_VERSION)}
 
 
-def upd_install(code, force=False):
+CHANGELOG_FILE = os.path.join(UPD_DIR, "changelog.json")
+
+
+def _save_changelog(ver, notes):
+    """Yangilanish o'rnatilganda, keyingi ishga tushganda ko'rsatish uchun versiya + yangiliklar matnini saqlaydi."""
+    try:
+        os.makedirs(UPD_DIR, exist_ok=True)
+        with open(CHANGELOG_FILE, "w", encoding="utf-8") as f:
+            json.dump({"version": ver, "notes": notes or ""}, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def pop_pending_changelog():
+    """Agar dastur hozirgina shu versiyaga yangilangan bo'lsa, (versiya, yangiliklar) ni bir marta qaytaradi va o'chiradi."""
+    try:
+        with open(CHANGELOG_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    try:
+        os.remove(CHANGELOG_FILE)
+    except OSError:
+        pass
+    if isinstance(d, dict) and d.get("version") == APP_VERSION:
+        return d.get("version"), d.get("notes", "")
+    return None
+
+
+def upd_install(code, force=False, notes=""):
     """Yangi kodni tekshirib (sintaksis + versiya) yangilanish papkasiga yozadi. Qaytaradi: o'rnatilgan versiya."""
     if not code_sig_ok(code):
         raise ValueError("Yangilanish imzosi noto'g'ri yoki yo'q — bu fayl dasturchi tomonidan berilmagan. O'rnatilmadi.")
@@ -5537,6 +5570,7 @@ def upd_install(code, force=False):
             os.remove(x)
         except OSError:
             pass
+    _save_changelog(ver, notes)
     return ver
 
 
@@ -5660,9 +5694,13 @@ def make_update_window(tk, ttk, filedialog, messagebox, T):
                 return
             cfg = upd_cfg_load()
             if not (cfg.get("url") or "").strip():
-                cfg = self._ask_cfg()
-                if not cfg:
-                    return
+                if DEFAULT_UPDATE_URL:
+                    cfg.update(url=DEFAULT_UPDATE_URL, token="", auto=True)
+                    upd_cfg_save(cfg)
+                else:
+                    cfg = self._ask_cfg()
+                    if not cfg:
+                        return
             url = cfg["url"].strip()
             self.busy = True
             self.btn.configure(state="disabled")
@@ -5686,7 +5724,7 @@ def make_update_window(tk, ttk, filedialog, messagebox, T):
                         P(("log", "Yangiliklar: " + str(r["notes"])))
                     P(("log", "Hajmi: %.0f KB. Butunlik (sha256) tekshirildi." % (len(r["code"]) / 1024.0)))
                     P(("prog", 0.85, "O'rnatilmoqda..."))
-                    v = upd_install(r["code"])
+                    v = upd_install(r["code"], notes=r.get("notes", ""))
                     P(("log", "TAYYOR: versiya %s o'rnatildi." % v))
                     P(("prog", 1.0, "Tayyor \u2714 — dasturni qayta ishga tushiring"))
                     P(("end", True))
@@ -6340,6 +6378,7 @@ def run_gui(on_ready=None):
             self._set_settings_visible(self.v_open.get())
             self.protocol("WM_DELETE_WINDOW", self._close)
             self.after(100, self._poll)
+            self.after(700, self._show_changelog_if_any)
             self.after(1200, self._auto_update_check)
             self.after(240000, self._lic_tick)
             if not (self.ffmpeg and self.ffprobe):
@@ -7106,6 +7145,10 @@ def run_gui(on_ready=None):
             """Dastur ochilganda orqa fonda yangilanishni tekshiradi (manzil kiritilgan bo'lsa)."""
             cfg = upd_cfg_load()
             url = (cfg.get("url") or "").strip()
+            if not url and DEFAULT_UPDATE_URL:
+                url = DEFAULT_UPDATE_URL
+                cfg.update(url=url, auto=True)
+                upd_cfg_save(cfg)
             if not url or not cfg.get("auto", True):
                 return
             res = {}
@@ -7127,6 +7170,21 @@ def run_gui(on_ready=None):
                     self.nav_btns["Yangilash"].configure(text=" Yangilash  \u25cf")
                     self.log("Yangi versiya mavjud: %s (hozir %s). Tepadagi 'Yangilash' tugmasini bosing." % (r["version"], APP_VERSION))
             self.after(1500, poll)
+
+        def _show_changelog_if_any(self):
+            """Dastur yangi versiyaga yangilanganidan keyin birinchi ochilishida, nima o'zgarganini ko'rsatadi."""
+            try:
+                r = pop_pending_changelog()
+            except Exception:
+                r = None
+            if not r:
+                return
+            ver, notes = r
+            notes = (notes or "").strip()
+            msg = "Dastur v%s versiyasiga yangilandi." % ver
+            if notes:
+                msg += "\n\nNima o'zgardi:\n" + notes
+            messagebox.showinfo(APP_NAME, msg, parent=self)
 
         def _about(self):
             dlg = tk.Toplevel(self)
@@ -7421,4 +7479,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# DS-SIG:0f1ad81ee2a68fb3a1d7a5e848d057717aacb2d4beb494de9eb7fff5aaeef4ac0e653df8fe5597bc82647b5b83a7a717d3b3a33b19c2506adec6ec71da877d03
+# DS-SIG:0d4ad5ed8dd2981849fbdde1a013d83510f1bb561ca26eb61088a61364f29ba5bf4b120e32b473d992112e0400b43448899e17282c8deb5e822fefc279bb8801
