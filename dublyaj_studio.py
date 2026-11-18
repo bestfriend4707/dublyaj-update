@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.14"
+APP_VERSION = "1.15"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -226,7 +226,7 @@ def machine_id_str():
 
 
 REVOKE_URL = ""   # make_release.py --revoke-url bilan avtomatik to'ldiriladi (bekor qilingan kalitlar ro'yxati, version.json kabi repoda)
-DEFAULT_UPDATE_URL = ""   # make_release.py --update-url bilan avtomatik to'ldiriladi — shu manzil bo'lsa, boshqa
+DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/bestfriend4707/dublyaj-update/main/version.json"   # make_release.py --update-url bilan avtomatik to'ldiriladi — shu manzil bo'lsa, boshqa
                            # kompyuterlarda "Yangilash" hech qanday repo/token so'ramaydi (ochiq, token talab qilmaydigan manba bo'lishi kerak)
 _REVOKE_CACHE_FILE = os.path.join(os.path.expanduser("~"), ".dublyaj_studio", "revoked.json")
 
@@ -589,8 +589,9 @@ PRESETS["Frame+ (faqat inson gaplari o'chadi, qolgan hammasi 100% o'zgarmaydi)"]
     # fondan/effektlardan birorta namuna ham o'zgartirilmaydi — faqat AI chiqargan "ovoz" qismi ayiriladi.
     mask_on=False,
     pad_ms=1000, pad_dip=0,           # qo'shimcha "pad" pasayishi yo'q (u ham mask o'chirilganda butun polosani pasaytirar edi)
-    # Dublyaj past bo'lsa, ko'rish paytida eshitilmay qolmasligi uchun biroz ko'tariladi (balans saqlanadi):
-    dub_target=-17, dub_level_up=6, dub_db=0, auto_dub=True,
+    # Dublyaj past bo'lsa, ko'rish paytida eshitilmay qolmasligi uchun ko'tariladi (balans saqlanadi,
+    # cho'qqi (clip) limiteri bilan himoyalangan — xirillash bo'lmaydi):
+    dub_target=-14, dub_level_up=8, dub_db=0, auto_dub=True,
     mode="ai", fc="ai")
 # "Frame+": duck_db/bg_db/dip_db = 0 va mask_on = False — dublyaj bor joyda chiqish aniq
 # "original - AI_ovoz" formulasi bilan hisoblanadi, boshqa hech qanday qo'shimcha pasaytirish/DSP
@@ -598,6 +599,14 @@ PRESETS["Frame+ (faqat inson gaplari o'chadi, qolgan hammasi 100% o'zgarmaydi)"]
 # inson ovozi olinadi. ai_engine="fast" tezlik uchun (Frame bilan bir xil tezlik, taxminan 1 soatlik
 # kinoga bir necha daqiqa). GPU/CPU tanlovi presetga bog'liq emas — bu avtomatik ravishda o'rnatilgan
 # onnxruntime turi va videokarta mavjudligiga qarab aniqlanadi (boshqa AI presetlar bilan bir xil tarzda).
+
+# Foydalanuvchiga faqat "Frame" va "Frame+" ko'rsatiladi — qolgan eski presetlar (Professional,
+# Standart va h.k.) yuqorida faqat shu ikkisini QURISH uchun ishlatilgan (dict(...) orqali nusxa
+# olingan), endi ular kerak emas va ro'yxatdan olib tashlanadi:
+for _k in list(PRESETS):
+    if not (_k.startswith("Frame (") or _k.startswith("Frame+ (")):
+        del PRESETS[_k]
+del _k
 
 
 # ----------------------------------------------------------------------------------------
@@ -854,13 +863,18 @@ class MDX:
         self.sess = None
         for prov in prefs:
             try:
-                # CPU: har yadroga bitta 1-oqimli sessiya (intra-op dan ~1.5x tezroq); GPU: bitta sessiya
-                n = min(ncpu, 6) if prov == "CPUExecutionProvider" else 1
+                # CPU: har yadroga bitta 1-oqimli sessiya (intra-op dan ~1.5x tezroq).
+                # GPU (DirectML/CUDA): bitta sessiyada hammasi ketma-ket bajarilsa, har bo'lakning
+                # FFT tayyorlash bosqichi (CPU'da) GPU bilan QATOR kutib turadi va juda sekinlashtiradi.
+                # Shuning uchun GPU'da ham bir nechta "ishchi" (odatda 3) ishlatiladi: bittasi GPU'da
+                # hisoblayotganda, boshqalari keyingi bo'lakning FFT'ini CPU'da tayyorlab turadi
+                # (quvur liniyasi kabi) — bir xil sifat, lekin ancha tezroq.
+                n = min(ncpu, 6) if prov == "CPUExecutionProvider" else min(3, max(1, ncpu))
                 ram = _avail_ram_mb()
                 if ram is not None:                                  # har sessiya ~0.6-1 GB xotira oladi
                     n = max(1, min(n, int((ram - 1500) // (1000 if key == "hq" else 700))))
                 so = ort.SessionOptions()
-                so.intra_op_num_threads = 1 if prov == "CPUExecutionProvider" else ncpu
+                so.intra_op_num_threads = 1 if prov == "CPUExecutionProvider" else max(1, ncpu // max(n, 1))
                 so.inter_op_num_threads = 1
                 if prov == "DmlExecutionProvider":                   # DirectML talabi
                     so.enable_mem_pattern = False
@@ -1987,7 +2001,7 @@ class Processor:
                         st.fc_mode = "mute"
                 if mdx is not None:
                     self.log(f"AI qurilma: {mdx.prov.replace('ExecutionProvider', '')}, "
-                             f"oqimlar: {max(1, os.cpu_count() or 2)}")
+                             f"parallel oqimlar: {mdx.n}")
                     steps = [k for k, on in (("front", ai_front), ("fc", fc_ai), ("rear", rear_ai)) if on]
                     share = w_ai / max(len(steps), 1)
                     for j, kind in enumerate(steps):
@@ -6485,7 +6499,7 @@ def run_gui(on_ready=None):
             self.v_engine = tk.StringVar(value=ENGINE_LABELS[d.ai_engine])
             if FROZEN and d.ai_engine == "demucs":
                 self.v_engine.set(ENGINE_LABELS["fast"])
-            self.v_preset = tk.StringVar(value="Standart (tavsiya)")
+            self.v_preset = tk.StringVar(value="Frame (studiya darajasi: faqat inson gaplari o'chadi, fon saqlanadi)")
             self.num = {k: tk.DoubleVar(value=getattr(d, k)) for k in
                         ("vocal_cut", "f_lo", "f_hi", "sharp", "center_cut", "protect", "leak_cancel", "dip_db", "fc_soft_db", "mask_margin", "mask_max_red", "mask_release", "pad_ms", "pad_dip", "bed_keep", "bed_margin", "duck_db", "thr_db", "attack",
                          "release", "hold", "look", "bg_db", "dub_db", "dub_target", "dub_level_up", "side_margin", "side_max_red", "test_start", "test_len")}
@@ -7479,4 +7493,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# DS-SIG:3e0fd83281046f3cd771457f9bcb22b7f1d71d2d864d17af88a3fc95b74cf2b29e17a77640cda370de988709b8efdb641e8c6e278e3ef3e85ae7031004b9650c
+# DS-SIG:aad0a5f8115b5c5fc4322e75eb912879a926bcc795174243df7cbf4efd8ce20239e0085d66218d56fdd99380928976be1a16d7b2a23f5a5b16da850698001c07
