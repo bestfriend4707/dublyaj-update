@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.11"
+APP_VERSION = "1.12"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -226,7 +226,7 @@ def machine_id_str():
 
 
 REVOKE_URL = ""   # make_release.py --revoke-url bilan avtomatik to'ldiriladi (bekor qilingan kalitlar ro'yxati, version.json kabi repoda)
-DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/bestfriend4707/dublyaj-update/main/version.json"   # make_release.py --update-url bilan avtomatik to'ldiriladi — shu manzil bo'lsa, boshqa
+DEFAULT_UPDATE_URL = ""   # make_release.py --update-url bilan avtomatik to'ldiriladi — shu manzil bo'lsa, boshqa
                            # kompyuterlarda "Yangilash" hech qanday repo/token so'ramaydi (ochiq, token talab qilmaydigan manba bo'lishi kerak)
 _REVOKE_CACHE_FILE = os.path.join(os.path.expanduser("~"), ".dublyaj_studio", "revoked.json")
 
@@ -589,8 +589,9 @@ PRESETS["Frame+ (faqat inson gaplari o'chadi, qolgan hammasi 100% o'zgarmaydi)"]
     # fondan/effektlardan birorta namuna ham o'zgartirilmaydi — faqat AI chiqargan "ovoz" qismi ayiriladi.
     mask_on=False,
     pad_ms=1000, pad_dip=0,           # qo'shimcha "pad" pasayishi yo'q (u ham mask o'chirilganda butun polosani pasaytirar edi)
-    # Dublyaj past bo'lsa, ko'rish paytida eshitilmay qolmasligi uchun biroz ko'tariladi (balans saqlanadi):
-    dub_target=-17, dub_level_up=6, dub_db=0, auto_dub=True,
+    # Dublyaj past bo'lsa, ko'rish paytida eshitilmay qolmasligi uchun ko'tariladi (balans saqlanadi,
+    # cho'qqi (clip) limiteri bilan himoyalangan — xirillash bo'lmaydi):
+    dub_target=-14, dub_level_up=8, dub_db=0, auto_dub=True,
     mode="ai", fc="ai")
 # "Frame+": duck_db/bg_db/dip_db = 0 va mask_on = False — dublyaj bor joyda chiqish aniq
 # "original - AI_ovoz" formulasi bilan hisoblanadi, boshqa hech qanday qo'shimcha pasaytirish/DSP
@@ -7478,5 +7479,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# DS-SIG:0d4ad5ed8dd2981849fbdde1a013d83510f1bb561ca26eb61088a61364f29ba5bf4b120e32b473d992112e0400b43448899e17282c8deb5e822fefc279bb8801
