@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.12"
+APP_VERSION = "1.13"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -589,9 +589,8 @@ PRESETS["Frame+ (faqat inson gaplari o'chadi, qolgan hammasi 100% o'zgarmaydi)"]
     # fondan/effektlardan birorta namuna ham o'zgartirilmaydi — faqat AI chiqargan "ovoz" qismi ayiriladi.
     mask_on=False,
     pad_ms=1000, pad_dip=0,           # qo'shimcha "pad" pasayishi yo'q (u ham mask o'chirilganda butun polosani pasaytirar edi)
-    # Dublyaj past bo'lsa, ko'rish paytida eshitilmay qolmasligi uchun ko'tariladi (balans saqlanadi,
-    # cho'qqi (clip) limiteri bilan himoyalangan — xirillash bo'lmaydi):
-    dub_target=-14, dub_level_up=8, dub_db=0, auto_dub=True,
+    # Dublyaj past bo'lsa, ko'rish paytida eshitilmay qolmasligi uchun biroz ko'tariladi (balans saqlanadi):
+    dub_target=-17, dub_level_up=6, dub_db=0, auto_dub=True,
     mode="ai", fc="ai")
 # "Frame+": duck_db/bg_db/dip_db = 0 va mask_on = False — dublyaj bor joyda chiqish aniq
 # "original - AI_ovoz" formulasi bilan hisoblanadi, boshqa hech qanday qo'shimcha pasaytirish/DSP
@@ -7480,4 +7479,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# DS-SIG:5568820cc56ce2757a5038461a12165399d368c4ccd492606295396ebb998808879e4e264d09e5220f38618c7f320a71b36a80cc5d77613ab39a5868e027020f
+# DS-SIG:3ea91349dab42f98922f7d8ff0a6791d25c5c9f0afe07b3d6b21d26b634addaa6ebdea430b88ba0b8941b9e613a783c0f235ccf6cd120480a1d52d831f317209
