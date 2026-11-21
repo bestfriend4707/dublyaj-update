@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.15"
+APP_VERSION = "1.16"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -226,7 +226,7 @@ def machine_id_str():
 
 
 REVOKE_URL = ""   # make_release.py --revoke-url bilan avtomatik to'ldiriladi (bekor qilingan kalitlar ro'yxati, version.json kabi repoda)
-DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/bestfriend4707/dublyaj-update/main/version.json"   # make_release.py --update-url bilan avtomatik to'ldiriladi — shu manzil bo'lsa, boshqa
+DEFAULT_UPDATE_URL = ""   # make_release.py --update-url bilan avtomatik to'ldiriladi — shu manzil bo'lsa, boshqa
                            # kompyuterlarda "Yangilash" hech qanday repo/token so'ramaydi (ochiq, token talab qilmaydigan manba bo'lishi kerak)
 _REVOKE_CACHE_FILE = os.path.join(os.path.expanduser("~"), ".dublyaj_studio", "revoked.json")
 
@@ -863,18 +863,17 @@ class MDX:
         self.sess = None
         for prov in prefs:
             try:
-                # CPU: har yadroga bitta 1-oqimli sessiya (intra-op dan ~1.5x tezroq).
-                # GPU (DirectML/CUDA): bitta sessiyada hammasi ketma-ket bajarilsa, har bo'lakning
-                # FFT tayyorlash bosqichi (CPU'da) GPU bilan QATOR kutib turadi va juda sekinlashtiradi.
-                # Shuning uchun GPU'da ham bir nechta "ishchi" (odatda 3) ishlatiladi: bittasi GPU'da
-                # hisoblayotganda, boshqalari keyingi bo'lakning FFT'ini CPU'da tayyorlab turadi
-                # (quvur liniyasi kabi) — bir xil sifat, lekin ancha tezroq.
-                n = min(ncpu, 6) if prov == "CPUExecutionProvider" else min(3, max(1, ncpu))
+                # CPU: har yadroga bitta 1-oqimli sessiya (intra-op dan ~1.5x tezroq); GPU: bitta sessiya
+                # (DirectML bir nechta sessiya/parallel Run() chaqiruvlarida ba'zi videokartalarda
+                # dasturni qulatishi aniqlandi — shuning uchun GPU'da faqat 1 ta sessiya ishlatiladi,
+                # tezlik esa alohida, xavfsiz usulda — keyingi bo'lakni oldindan CPU'da tayyorlab
+                # qo'yish (pipeline) orqali — oshiriladi, pastdagi vocals_many() ga qarang).
+                n = min(ncpu, 6) if prov == "CPUExecutionProvider" else 1
                 ram = _avail_ram_mb()
                 if ram is not None:                                  # har sessiya ~0.6-1 GB xotira oladi
                     n = max(1, min(n, int((ram - 1500) // (1000 if key == "hq" else 700))))
                 so = ort.SessionOptions()
-                so.intra_op_num_threads = 1 if prov == "CPUExecutionProvider" else max(1, ncpu // max(n, 1))
+                so.intra_op_num_threads = 1 if prov == "CPUExecutionProvider" else ncpu
                 so.inter_op_num_threads = 1
                 if prov == "DmlExecutionProvider":                   # DirectML talabi
                     so.enable_mem_pattern = False
@@ -944,18 +943,39 @@ class MDX:
             log(f"AI parallel oqimlar: {self.n}")
 
     def vocals_many(self, xs):
-        """Bir nechta bo'lakni parallel ishlaydi (har bir sessiyaga bittadan)."""
-        if self.pool is None or len(xs) == 1:
+        """Bir nechta bo'lakni ishlaydi.
+        n>1 (CPU, bir nechta sessiya): har biriga alohida sessiya — parallel.
+        n==1 (odatda GPU): FAQAT bitta session.run() bir vaqtda chaqiriladi (bir nechta parallel
+        Run() chaqiruvi ba'zi GPU/DirectML drayverlarida dasturni qulatishi aniqlangan — xavfsizlik
+        uchun bunday qilinmaydi). Shu bilan birga, tezlik uchun "quvur liniyasi" (pipeline)
+        qo'llaniladi: keyingi bo'lakning FFT tayyorgarligi (faqat CPU, ONNX bilan bog'liq emas)
+        fon oqimida OLDINDAN tayyorlanadi, shu bilan GPU hisoblash vaqtida CPU bekor turmaydi.
+        Natija (sifat) bir xil — faqat hisoblash tartibi optimallashtirilgan."""
+        if len(xs) <= 1:
             return [self.vocals(x) for x in xs]
-        return list(self.pool.map(lambda a: self.vocals(a[1], a[0] % self.n), enumerate(xs)))
+        if self.pool is not None:
+            return list(self.pool.map(lambda a: self.vocals(a[1], a[0] % self.n), enumerate(xs)))
+        out = [None] * len(xs)
+        with ThreadPoolExecutor(1) as prep_pool:
+            nxt = prep_pool.submit(self._prep, xs[0])
+            for i in range(len(xs)):
+                inp = nxt.result()
+                nxt = prep_pool.submit(self._prep, xs[i + 1]) if i + 1 < len(xs) else None
+                out[i] = self._infer_post(inp)
+        return out
 
-    def vocals(self, x, k=0):
-        """x: (chunk, 2) float32 -> (chunk, 2) vokal bahosi."""
+    def _prep(self, x):
+        """x: (chunk, 2) float32 -> ONNX kiritish tenzori (faqat CPU, FFT). GPU bilan bog'liq emas,
+        shuning uchun fon oqimida xavfsiz oldindan tayyorlab qo'yish mumkin."""
         nf, T = self.n_fft, self.dim_t
         xp = np.pad(x.T, ((0, 0), (nf // 2, nf // 2)), mode="reflect")
         fr = xp[:, self.idx] * self.win                                   # (2, T, nf)
         S = np.fft.rfft(fr, axis=-1)[:, :, :self.dim_f].transpose(0, 2, 1)   # (2, F, T)
-        inp = np.stack([S.real, S.imag], axis=1).reshape(1, 4, self.dim_f, T).astype(np.float32)
+        return np.stack([S.real, S.imag], axis=1).reshape(1, 4, self.dim_f, T).astype(np.float32)
+
+    def _infer_post(self, inp, k=0):
+        """ONNX modeldan o'tkazadi va vaqt sohasiga qaytaradi (ISTFT)."""
+        nf, T = self.n_fft, self.dim_t
         y = self.sessions[k].run(None, {self.name: inp})[0].reshape(2, 2, self.dim_f, T)
         Y = np.zeros((2, nf // 2 + 1, T), np.complex64)
         Y[:, :self.dim_f, :] = y[:, 0] + 1j * y[:, 1]
@@ -965,6 +985,10 @@ class MDX:
             o[:, t * MDX_HOP:t * MDX_HOP + nf] += fr2[:, t]
         o = o / self.env
         return (o[:, nf // 2:nf // 2 + self.chunk] * self.comp).T
+
+    def vocals(self, x, k=0):
+        """x: (chunk, 2) float32 -> (chunk, 2) vokal bahosi (bitta bo'lak, oddiy ketma-ket yo'l)."""
+        return self._infer_post(self._prep(x), k)
 
 
 # ----------------------------------------------------------------------------------------
@@ -7493,4 +7517,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# DS-SIG:aad0a5f8115b5c5fc4322e75eb912879a926bcc795174243df7cbf4efd8ce20239e0085d66218d56fdd99380928976be1a16d7b2a23f5a5b16da850698001c07
+# DS-SIG:f008413079271515a138ad3d3d15487ba52a86119bc626fb248ce238db5d438067a7cc1b5124e82aaf7b4bc7696fa3cf4198c610da4980029ff5d51aee305804
