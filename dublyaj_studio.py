@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.16"
+APP_VERSION = "1.17"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -226,7 +226,7 @@ def machine_id_str():
 
 
 REVOKE_URL = ""   # make_release.py --revoke-url bilan avtomatik to'ldiriladi (bekor qilingan kalitlar ro'yxati, version.json kabi repoda)
-DEFAULT_UPDATE_URL = ""   # make_release.py --update-url bilan avtomatik to'ldiriladi — shu manzil bo'lsa, boshqa
+DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/bestfriend4707/dublyaj-update/main/version.json"   # make_release.py --update-url bilan avtomatik to'ldiriladi — shu manzil bo'lsa, boshqa
                            # kompyuterlarda "Yangilash" hech qanday repo/token so'ramaydi (ochiq, token talab qilmaydigan manba bo'lishi kerak)
 _REVOKE_CACHE_FILE = os.path.join(os.path.expanduser("~"), ".dublyaj_studio", "revoked.json")
 
@@ -460,6 +460,78 @@ def lic_require():
 # ----------------------------------------------------------------------------------------
 UPD_DIR = os.path.join(os.path.expanduser("~"), ".dublyaj_studio", "update")
 UPD_FILE = os.path.join(UPD_DIR, "dublyaj_studio.py")
+
+TMP_REGISTRY = os.path.join(os.path.expanduser("~"), ".dublyaj_studio", "tmp_dirs.json")
+
+
+def _tmp_registry_add(path):
+    """Vaqtinchalik (AI ishlov berish) papkani ro'yxatga qo'shadi — dastur kutilmaganda
+    yopilib qolsa ham (masalan, drayver xatosi), keyingi ishga tushganda bu papka topilib
+    avtomatik o'chiriladi (disk to'lib qolmasligi uchun)."""
+    try:
+        os.makedirs(os.path.dirname(TMP_REGISTRY), exist_ok=True)
+        try:
+            with open(TMP_REGISTRY, encoding="utf-8") as f:
+                lst = json.load(f)
+        except (OSError, ValueError):
+            lst = []
+        if path not in lst:
+            lst.append(path)
+        with open(TMP_REGISTRY, "w", encoding="utf-8") as f:
+            json.dump(lst, f)
+    except OSError:
+        pass
+
+
+def _tmp_registry_remove(path):
+    try:
+        with open(TMP_REGISTRY, encoding="utf-8") as f:
+            lst = json.load(f)
+    except (OSError, ValueError):
+        return
+    try:
+        lst = [p for p in lst if p != path]
+        with open(TMP_REGISTRY, "w", encoding="utf-8") as f:
+            json.dump(lst, f)
+    except OSError:
+        pass
+
+
+def cleanup_orphaned_temp(log=None):
+    """Dastur ishga tushganda chaqiriladi: oldingi ishlashlardan (ayniqsa kutilmagan
+    yopilib qolishdan keyin) qolib ketgan vaqtinchalik AI-papkalarni va eski yangilanish
+    zaxiralarini avtomatik tozalaydi."""
+    try:
+        with open(TMP_REGISTRY, encoding="utf-8") as f:
+            lst = json.load(f)
+    except (OSError, ValueError):
+        lst = []
+    left, cleaned = [], 0
+    for p in lst:
+        try:
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+                cleaned += 1
+            # agar papka hali ham mavjud bo'lsa (masalan, boshqa jarayon ishlatayotgan bo'lsa), keyingi safar ham urinib ko'rish uchun ro'yxatda qoldiriladi
+            if os.path.isdir(p):
+                left.append(p)
+        except OSError:
+            left.append(p)
+    try:
+        os.makedirs(os.path.dirname(TMP_REGISTRY), exist_ok=True)
+        with open(TMP_REGISTRY, "w", encoding="utf-8") as f:
+            json.dump(left, f)
+    except OSError:
+        pass
+    for suf in (".bad", ".prev"):                      # eski yangilanish zaxira fayllari ham tozalanadi
+        fp = UPD_FILE + suf
+        try:
+            if os.path.isfile(fp):
+                os.remove(fp)
+        except OSError:
+            pass
+    if cleaned and log:
+        log(f"Tozalash: {cleaned} ta avvalgi vaqtinchalik papka o'chirildi (joy bo'shatildi).")
 
 
 def vtuple(v):
@@ -873,7 +945,10 @@ class MDX:
                 if ram is not None:                                  # har sessiya ~0.6-1 GB xotira oladi
                     n = max(1, min(n, int((ram - 1500) // (1000 if key == "hq" else 700))))
                 so = ort.SessionOptions()
-                so.intra_op_num_threads = 1 if prov == "CPUExecutionProvider" else ncpu
+                # GPU'da aksariyat hisoblash videokartada bajariladi; CPU'ga juda ko'p oqim berish
+                # (barcha yadro) faqat fon ishlari (FFT, pipeline tayyorgarligi) bilan bellashib,
+                # ba'zan sekinlashtiradi — shuning uchun mo''tadil son (2) ishlatiladi.
+                so.intra_op_num_threads = 1 if prov == "CPUExecutionProvider" else min(2, ncpu)
                 so.inter_op_num_threads = 1
                 if prov == "DmlExecutionProvider":                   # DirectML talabi
                     so.enable_mem_pattern = False
@@ -1993,6 +2068,7 @@ class Processor:
 
             if ai:
                 self.tmp = tempfile.mkdtemp(prefix="dublyaj_", dir=os.path.dirname(os.path.abspath(st.dst)) or None)
+                _tmp_registry_add(self.tmp)
 
             ai_file = fc_file = rear_file = None
             ai_front = ai
@@ -2256,6 +2332,8 @@ class Processor:
                         pass
             if self.tmp and os.path.isdir(self.tmp):
                 shutil.rmtree(self.tmp, ignore_errors=True)
+            if self.tmp:
+                _tmp_registry_remove(self.tmp)
             if out_tmp and os.path.exists(out_tmp):
                 try:
                     time.sleep(0.3)
@@ -6416,6 +6494,10 @@ def run_gui(on_ready=None):
             self._set_settings_visible(self.v_open.get())
             self.protocol("WM_DELETE_WINDOW", self._close)
             self.after(100, self._poll)
+            try:
+                cleanup_orphaned_temp(self.log)
+            except Exception:
+                pass
             self.after(700, self._show_changelog_if_any)
             self.after(1200, self._auto_update_check)
             self.after(240000, self._lic_tick)
@@ -7517,4 +7599,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# DS-SIG:f008413079271515a138ad3d3d15487ba52a86119bc626fb248ce238db5d438067a7cc1b5124e82aaf7b4bc7696fa3cf4198c610da4980029ff5d51aee305804
+# DS-SIG:2f8fb1c280baffad0b515f010c03d8286fc8bdc0617236e1b09f4ef9f1b0405502bee313f2283239b3a835c89f5113b9e711494a5479dd8ac2d33976bfd9530a
