@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.17"
+APP_VERSION = "1.18"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -3328,7 +3328,10 @@ def build_intro_cmd(ffmpeg, movie, intro, intro_path, out_path, iext, plan=None)
         if lim:
             mr = min(cap, lim[0])
             rate = ["-maxrate", str(mr), "-bufsize", str(min(mr * 2, lim[1]))]
-        cmd += ["-preset", "slower", "-crf", "8", "-x264-params", "aq-mode=3"] + rate
+        # bf=0 (B-kadrsiz): DTS har doim PTS ga teng, "qarz" qolmaydi — shuning uchun reklama
+        # tugab kino boshlanganda vaqt belgisi (DTS) uzilib/aralashib qolmaydi va tasvir qotib
+        # qolmaydi. CRF asosida kodlanganligi uchun sifat bir xil qoladi, fayl ozgina kattaroq bo'lishi mumkin.
+        cmd += ["-preset", "slower", "-crf", "8", "-x264-params", "aq-mode=3:bframes=0"] + rate
         prof = h264_profile(mv.get("profile"))
         if prof:
             cmd += ["-profile:v", prof]
@@ -3345,7 +3348,7 @@ def build_intro_cmd(ffmpeg, movie, intro, intro_path, out_path, iext, plan=None)
         except (TypeError, ValueError):
             pass
     elif venc == "libx265":
-        xp = ["aq-mode=3"] + (x265_hdr_params(mv) if hdr_kind(mv) == "pq" else [])
+        xp = ["aq-mode=3", "bframes=0"] + (x265_hdr_params(mv) if hdr_kind(mv) == "pq" else [])
         cmd += ["-preset", "slow", "-crf", "10", "-x265-params", ":".join(xp)] + rate
     elif venc == "libvpx-vp9":
         cmd += ["-crf", "12", "-b:v", "0"]
@@ -4267,7 +4270,7 @@ def make_intro_window(tk, ttk, filedialog, messagebox, T):
                 is_mkv = ext == ".mkv"
                 attach = movie["attach"] if is_mkv else []                 # shrift ilovalari
                 chapters = movie["chapters"] if (is_mkv or ext in MP4_EXTS) else []
-                cmd = [ffmpeg] + BASE + ["-f", "concat", "-safe", "0", "-i", lst]
+                cmd = [ffmpeg] + BASE + ["-fflags", "+genpts", "-f", "concat", "-safe", "0", "-i", lst]
                 n_in = 1
                 if keep or offs or attach:
                     # kinoning o'zidan: subtitrlar, ilovalar va (mos kelmagan) audio treklar, reklama uzunligiga siljitilgan holda
@@ -7599,4 +7602,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# DS-SIG:2f8fb1c280baffad0b515f010c03d8286fc8bdc0617236e1b09f4ef9f1b0405502bee313f2283239b3a835c89f5113b9e711494a5479dd8ac2d33976bfd9530a
+# DS-SIG:d02e390de89ebd619c41db926746e8745b47c1dd17b9ed3313537c9e2f404d6cc80c58b64622de11e25e37f5fb95dd162bd9aa6f0b428c2055d6673963b9820f
