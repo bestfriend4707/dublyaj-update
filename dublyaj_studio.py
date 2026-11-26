@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.19"
+APP_VERSION = "1.20"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -7607,4 +7607,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# DS-SIG:65f7e2ffc5dc2b7f74c4f479e4e60232852d8f3ba13be61a1bc0f96f2aeed263472bee1e1f4769fb2d87dbdef2066daf9bc5e97a5ea674eeb4c1f440a9ea050b
+# DS-SIG:7c87167c05c29b29cc61ea77a5718d8d47513ff3171e44eea5d601d2917160959f02bc16f150be13c04feda9e0175062434395048f33ef20097da7b765314101
