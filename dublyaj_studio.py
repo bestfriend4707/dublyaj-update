@@ -5800,8 +5800,8 @@ def make_update_window(tk, ttk, filedialog, messagebox, T):
             self.app = master
             self.title("Yangilash")
             self.configure(bg=BG)
-            self.geometry("560x470")
-            self.minsize(500, 420)
+            self.geometry("560x510")
+            self.minsize(500, 460)
             try:
                 self.iconphoto(False, logo_image(64, self))
             except Exception:
@@ -5823,6 +5823,10 @@ def make_update_window(tk, ttk, filedialog, messagebox, T):
             self.btn = ttk.Button(top, text=" Yangilash", image=icon_image("download", 20, "#ffffff", self), compound="left",
                                   style="Accent.TButton", command=self.go)
             self.btn.pack(fill="x", ipady=8)
+            self.btn_off = ttk.Button(top, text=" Offline yangilash (fayldan)...",
+                                       image=icon_image("file", 20, FG, self), compound="left",
+                                       command=self.go_offline)
+            self.btn_off.pack(fill="x", ipady=6, pady=(6, 0))
             self.pb = ttk.Progressbar(self, maximum=1000, mode="determinate")
             self.pb.pack(fill="x", padx=16, pady=(8, 2))
             self.lbl = ttk.Label(self, text="Tayyor", style="Muted.TLabel")
@@ -5859,6 +5863,7 @@ def make_update_window(tk, ttk, filedialog, messagebox, T):
                     elif k == "end":
                         self.busy = False
                         self.btn.configure(state="normal")
+                        self.btn_off.configure(state="normal")
                         if a[0]:
                             self._ask_restart()
             except queue.Empty:
@@ -5916,6 +5921,37 @@ def make_update_window(tk, ttk, filedialog, messagebox, T):
                     v = upd_install(r["code"], notes=r.get("notes", ""))
                     P(("log", "TAYYOR: versiya %s o'rnatildi." % v))
                     P(("prog", 1.0, "Tayyor \u2714 — dasturni qayta ishga tushiring"))
+                    P(("end", True))
+                except Exception as e:                       # noqa
+                    P(("log", "XATO: " + str(e)[:300]))
+                    P(("prog", 0.0, "Xato"))
+                    P(("end", False))
+            threading.Thread(target=w, daemon=True).start()
+
+        def go_offline(self):
+            """Internetga ulanmasdan: foydalanuvchi o'zi bergan dublyaj_studio.py faylini tanlab,
+            imzosi tekshirilib (faqat dasturchi tomonidan imzolangan fayl qabul qilinadi), avtomatik o'rnatiladi."""
+            if self.busy:
+                return
+            path = filedialog.askopenfilename(parent=self, title="Yangi dublyaj_studio.py faylini tanlang",
+                                                filetypes=[("Python fayli", "*.py"), ("Barcha fayllar", "*.*")])
+            if not path:
+                return
+            self.busy = True
+            self.btn.configure(state="disabled")
+            self.btn_off.configure(state="disabled")
+            self._prog(0.1, "Fayl tekshirilmoqda...")
+            self._log("Tanlangan fayl: %s" % path)
+            P = self.q.put
+
+            def w():
+                try:
+                    with open(path, "rb") as f:
+                        code = f.read()
+                    P(("prog", 0.5, "Imzo va versiya tekshirilmoqda..."))
+                    v = upd_install(code, notes="")
+                    P(("log", "TAYYOR: versiya %s fayldan o'rnatildi." % v))
+                    P(("prog", 1.0, "Tayyor ✔ — dasturni qayta ishga tushiring"))
                     P(("end", True))
                 except Exception as e:                       # noqa
                     P(("log", "XATO: " + str(e)[:300]))
@@ -7672,4 +7708,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# DS-SIG:2b5db9fd50a54f8321787a6c15235a20ae8e6f679dc4c1aff5e0ccbf8ca8ae65512ec0641c9e771d92b1a8f2c5ca6356c74f1b095bae41a828971b627c1c3e0f
+# DS-SIG:202102d0478df0c0fc4892fb97f9035ca2b0de225ef1f839e67d26e2f85653af8f92707e9c7ea1ddf7cfedb0321481006dea954e3f621f8a4b3bfb3f525c5404
