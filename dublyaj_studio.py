@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.18"
+APP_VERSION = "1.19"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -3428,10 +3428,15 @@ def build_av_copy_cmd(ffmpeg, src, info, out_path, inband=False, extra=()):
     """Faqat video+audio ni (copy) MKV ga ko'chirish — timebase ni 1/1000 ga tenglashtiradi.
     inband=True: kinoning o'z SPS/PPS/VPS parametrlari har bir kalit kadr oldiga kadrlar ichiga qo'yiladi
     (kadr ma'lumotlari o'zgarmaydi), shunda reklamaning parametrlari kinoni buzmaydi."""
-    cmd = [ffmpeg] + BASE + ["-i", src, "-map", "0:%d" % info["video"]["index"]]
+    # -fflags +genpts (kirish tomonida): manba faylda B-kadrlar sabab ba'zan manfiy/noaniq DTS bo'ladi;
+    # bu nusxa (kadr ma'lumoti o'zgarmaydi, faqat vaqt belgisi tozalanadi) birlashtirishdan OLDIN
+    # 0 dan boshlanadigan toza DTS bilan qayta hisoblanadi, shunda keyingi concat bosqichida
+    # tikuv joyida "noaniq DTS" xatosi va tasvir qotib qolishi oldi olinadi. Original fayl o'zgarmaydi.
+    cmd = [ffmpeg] + BASE + ["-fflags", "+genpts", "-i", src, "-map", "0:%d" % info["video"]["index"]]
     for a in info["audio"]:
         cmd += ["-map", "0:%d" % a["index"]]
-    cmd += ["-c", "copy", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1", "-fflags", "+bitexact"]
+    cmd += ["-c", "copy", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1", "-fflags", "+bitexact",
+            "-avoid_negative_ts", "make_zero"]
     if inband and INBAND_BSF.get(info["video"].get("codec_name")):
         cmd += ["-bsf:v", INBAND_BSF[info["video"]["codec_name"]]]
     cmd += list(extra) + [out_path]
@@ -7602,4 +7607,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# DS-SIG:d02e390de89ebd619c41db926746e8745b47c1dd17b9ed3313537c9e2f404d6cc80c58b64622de11e25e37f5fb95dd162bd9aa6f0b428c2055d6673963b9820f
+# DS-SIG:65f7e2ffc5dc2b7f74c4f479e4e60232852d8f3ba13be61a1bc0f96f2aeed263472bee1e1f4769fb2d87dbdef2066daf9bc5e97a5ea674eeb4c1f440a9ea050b
