@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.21"
+APP_VERSION = "1.22"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -4029,7 +4029,7 @@ def make_intro_window(tk, ttk, filedialog, messagebox, T):
             self.q.put(("progress", hi))
 
         # ---- video oqimini MPEG-TS orqali "payvandlash" (tikuv joyidagi qotishni oldini olish) ----
-        def _ts_splice(self, ffmpeg, use_intro, use_movie, vcodec, tmpdir):
+        def _ts_splice(self, ffmpeg, ffprobe, use_intro, use_movie, vcodec, tmpdir, dur_fallback):
             """Reklama+kino video oqimini concat demuxer o'rniga MPEG-TS orqali ulaydi.
             Sabab: kinoning o'zida (B-kadrlar tufayli) tabiiy kodlash kechikishi (encoder delay) bor —
             concat demuxer bunday paytda ikkinchi fayl uchun DTS siljishini noto'g'ri hisoblab, tikuv
@@ -4038,7 +4038,9 @@ def make_intro_window(tk, ttk, filedialog, messagebox, T):
             uzilishlarni silliq boshqarish uchun mo'ljallangan, shuning uchun bu yerda ham ishlatiladi.
             (Oraliq MPEG-TS bosqichida chiqadigan "timestamp discontinuity"/"Packet corrupt" kabi
             xabarlar kutilgan va zararsiz, shuning uchun asosiy logga chiqarilmaydi.)
-            Qaytaradi: faqat video oqimli, toza DTS bilan tayyor mp4 fayl yo'li."""
+            Qaytaradi: (faqat video oqimli, toza DTS bilan tayyor mp4 fayl yo'li,
+            reklamaning VIDEO oqimi asosida hisoblangan aniq davomiyligi — ovoz/subtitr/boblar
+            aynan shu qiymat bilan siljitilishi kerak, aks holda ovoz oldinda/orqada qolib ketadi)."""
             if self._cancel_requested():
                 raise IJCancelled()
             bsf = INBAND_BSF.get(vcodec)
@@ -4060,7 +4062,11 @@ def make_intro_window(tk, ttk, filedialog, messagebox, T):
                                 creationflags=NO_WINDOW)
             if r.returncode != 0:
                 raise RuntimeError((r.stderr.strip().splitlines() or ["ffmpeg xato"])[-1][:200])
-            return out
+            # reklama segmentining HAQIQIY (video oqimi asosidagi) davomiyligi — concat protokoli
+            # aynan shu uzunlikdan keyin kino kadrlarini boshlaydi, shuning uchun ovoz/subtitr/boblar
+            # ham xuddi shu qiymatga ko'ra siljitilishi kerak (aks holda video bilan ovoz orasida siljish paydo bo'ladi)
+            ad_dur = media_span(ffprobe, ad_ts, dur_fallback)
+            return out, ad_dur
 
         # ---- navbatni ketma-ket ishlov berish ----
         def _batch(self, jobs, intro_path, keep_container, skip_existing):
@@ -4299,8 +4305,11 @@ def make_intro_window(tk, ttk, filedialog, messagebox, T):
                 vid_fixed = None
                 if movie["video"].get("codec_name") in INBAND_BSF:
                     try:
-                        vid_fixed = self._ts_splice(ffmpeg, use_intro, use_movie,
-                                                     movie["video"]["codec_name"], tmpdir)
+                        vid_fixed, ts_dur = self._ts_splice(ffmpeg, ffprobe, use_intro, use_movie,
+                                                             movie["video"]["codec_name"], tmpdir, intro_dur)
+                        # ovoz/subtitr/boblar video bilan bir xil nuqtada siljishi uchun, ularning
+                        # siljish qiymati ham videoning HAQIQIY (TS orqali ulangan) davomiyligiga tengla(na)di
+                        intro_dur = ts_dur
                     except Exception as e:  # noqa: BLE001
                         self.vlog("MPEG-TS orqali video payvandlash muvaffaqiyatsiz, eski usulga o'tildi: %s" % e)
                         vid_fixed = None
@@ -7663,4 +7672,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# DS-SIG:cf7810c6b588aea34db2020b9e4db841c08557f919d802cd85996dd4b916e77cce3197a29320d2eccf4582f38803320f2eb56da2a47d0ab0be6b0d349c0b4e0e
+# DS-SIG:fbbe542429996327d0334b0104e46dae3094567ae3d079ea880ff3480489fa036842d9f60a4cb37b42f7c1543845b427298b8e7acd16a84f5f5c935a5ca60d02
