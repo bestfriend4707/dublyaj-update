@@ -35,7 +35,7 @@ import numpy as np
 from fractions import Fraction
 
 APP_NAME = "Dublyaj Studio"
-APP_VERSION = "1.20"
+APP_VERSION = "1.21"
 FROZEN = bool(getattr(sys, "frozen", False))      # PyInstaller (.exe) ichida ishlayaptimi
 
 # ----------------------------------------------------------------------------------------
@@ -4028,6 +4028,40 @@ def make_intro_window(tk, ttk, filedialog, messagebox, T):
                 raise RuntimeError("ffmpeg xato bilan tugadi (kod %d). Yuqoridagi logga qarang." % fix_rc(rc))
             self.q.put(("progress", hi))
 
+        # ---- video oqimini MPEG-TS orqali "payvandlash" (tikuv joyidagi qotishni oldini olish) ----
+        def _ts_splice(self, ffmpeg, use_intro, use_movie, vcodec, tmpdir):
+            """Reklama+kino video oqimini concat demuxer o'rniga MPEG-TS orqali ulaydi.
+            Sabab: kinoning o'zida (B-kadrlar tufayli) tabiiy kodlash kechikishi (encoder delay) bor —
+            concat demuxer bunday paytda ikkinchi fayl uchun DTS siljishini noto'g'ri hisoblab, tikuv
+            joyida bir necha kadrning taqdim etish vaqti (CTS) buzilib ketadi va pleyerda tasvir
+            qotib/sakrab qoladi. MPEG-TS konteyneri reklama qo'yish (broadcast splice) uchun aynan shu
+            uzilishlarni silliq boshqarish uchun mo'ljallangan, shuning uchun bu yerda ham ishlatiladi.
+            (Oraliq MPEG-TS bosqichida chiqadigan "timestamp discontinuity"/"Packet corrupt" kabi
+            xabarlar kutilgan va zararsiz, shuning uchun asosiy logga chiqarilmaydi.)
+            Qaytaradi: faqat video oqimli, toza DTS bilan tayyor mp4 fayl yo'li."""
+            if self._cancel_requested():
+                raise IJCancelled()
+            bsf = INBAND_BSF.get(vcodec)
+            ad_ts = os.path.join(tmpdir, "splice_ad.ts")
+            mv_ts = os.path.join(tmpdir, "splice_movie.ts")
+            for src, dst in ((use_intro, ad_ts), (use_movie, mv_ts)):
+                c = [ffmpeg] + BASE + ["-i", src, "-map", "0:v:0", "-c", "copy"]
+                if bsf:
+                    c += ["-bsf:v", bsf]
+                c += ["-f", "mpegts", dst]
+                r = subprocess.run(c, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                    creationflags=NO_WINDOW)
+                if r.returncode != 0:
+                    raise RuntimeError((r.stderr.strip().splitlines() or ["ffmpeg xato"])[-1][:200])
+            out = os.path.join(tmpdir, "splice_video.mp4")
+            c = ([ffmpeg] + BASE + ["-fflags", "+genpts", "-i", "concat:%s|%s" % (ad_ts, mv_ts),
+                 "-map", "0:v:0", "-c:v", "copy", "-avoid_negative_ts", "make_zero", out])
+            r = subprocess.run(c, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                creationflags=NO_WINDOW)
+            if r.returncode != 0:
+                raise RuntimeError((r.stderr.strip().splitlines() or ["ffmpeg xato"])[-1][:200])
+            return out
+
         # ---- navbatni ketma-ket ishlov berish ----
         def _batch(self, jobs, intro_path, keep_container, skip_existing):
             cache = {"dir": None, "items": {}}
@@ -4256,6 +4290,21 @@ def make_intro_window(tk, ttk, filedialog, messagebox, T):
                     fixed_info = ij_probe(ffprobe, norm_intro)
                 intro_dur = media_span(ffprobe, use_intro, fixed_info["duration"])
 
+                # ---- video oqimi: MPEG-TS orqali payvandlash (tikuv joyida qotib qolishning oldini oladi) ----
+                # Sabab: kinoning o'zida odatiy B-kadrlar bo'lgani uchun kodlash kechikishi (encoder delay)
+                # bor; oddiy concat demuxer (-f concat) bunday holatda ikkinchi segment uchun DTS siljishini
+                # noto'g'ri hisoblab, tikuv joyidagi bir necha kadrning taqdim etish vaqtini (CTS) buzib
+                # yuboradi — aynan shu "qotib/sakrab qolish" ko'rinishida namoyon bo'ladi. MPEG-TS esa reklama
+                # qo'yish (broadcast splice) uchun shunday uzilishlarni silliq boshqarishga mo'ljallangan.
+                vid_fixed = None
+                if movie["video"].get("codec_name") in INBAND_BSF:
+                    try:
+                        vid_fixed = self._ts_splice(ffmpeg, use_intro, use_movie,
+                                                     movie["video"]["codec_name"], tmpdir)
+                    except Exception as e:  # noqa: BLE001
+                        self.vlog("MPEG-TS orqali video payvandlash muvaffaqiyatsiz, eski usulga o'tildi: %s" % e)
+                        vid_fixed = None
+
                 # ---- birlashtirish (video/audio — copy) ----
                 lst = os.path.join(tmpdir, "list.txt")
                 with open(lst, "w", encoding="utf-8") as f:
@@ -4275,12 +4324,19 @@ def make_intro_window(tk, ttk, filedialog, messagebox, T):
                 is_mkv = ext == ".mkv"
                 attach = movie["attach"] if is_mkv else []                 # shrift ilovalari
                 chapters = movie["chapters"] if (is_mkv or ext in MP4_EXTS) else []
-                cmd = [ffmpeg] + BASE + ["-fflags", "+genpts", "-f", "concat", "-safe", "0", "-i", lst]
-                n_in = 1
+                cmd = [ffmpeg] + BASE
+                n_in = 0
+                vid_idx = None
+                if vid_fixed:
+                    cmd += ["-i", vid_fixed]
+                    vid_idx, n_in = n_in, n_in + 1
+                cmd += ["-fflags", "+genpts", "-f", "concat", "-safe", "0", "-i", lst]
+                list_idx, n_in = n_in, n_in + 1
+                mv_idx = None
                 if keep or offs or attach:
                     # kinoning o'zidan: subtitrlar, ilovalar va (mos kelmagan) audio treklar, reklama uzunligiga siljitilgan holda
                     cmd += ["-itsoffset", "%.6f" % intro_dur, "-i", movie_path]
-                    n_in += 1
+                    mv_idx, n_in = n_in, n_in + 1
                 ch_idx = None
                 if chapters:
                     chfile = os.path.join(tmpdir, "chapters.ffmeta")
@@ -4289,13 +4345,13 @@ def make_intro_window(tk, ttk, filedialog, messagebox, T):
                         f.write(ffmetadata_chapters(chapters, intro_dur + negative_lead(ffprobe, use_intro)))
                     cmd += ["-i", chfile]
                     ch_idx = n_in
-                cmd += ["-map", "0:v:0"]
+                cmd += ["-map", "%d:v:0" % (vid_idx if vid_idx is not None else list_idx)]
                 for i, a in enumerate(ma):
-                    cmd += ["-map", ("1:%d" % a["index"]) if i in offs else ("0:a:%d" % i)]
+                    cmd += ["-map", ("%d:%d" % (mv_idx, a["index"])) if i in offs else ("%d:a:%d" % (list_idx, i))]
                 for st, _ in keep:
-                    cmd += ["-map", "1:%d" % st["index"]]
+                    cmd += ["-map", "%d:%d" % (mv_idx, st["index"])]
                 for at in attach:
-                    cmd += ["-map", "1:%d" % at["index"]]
+                    cmd += ["-map", "%d:%d" % (mv_idx, at["index"])]
                 cmd += ["-c:v", "copy", "-c:a", "copy"] + (["-c:t", "copy"] if attach else [])
                 for n, (_, codec) in enumerate(keep):
                     cmd += ["-c:s:%d" % n, codec]
@@ -7607,4 +7663,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# DS-SIG:7c87167c05c29b29cc61ea77a5718d8d47513ff3171e44eea5d601d2917160959f02bc16f150be13c04feda9e0175062434395048f33ef20097da7b765314101
+# DS-SIG:cf7810c6b588aea34db2020b9e4db841c08557f919d802cd85996dd4b916e77cce3197a29320d2eccf4582f38803320f2eb56da2a47d0ab0be6b0d349c0b4e0e
